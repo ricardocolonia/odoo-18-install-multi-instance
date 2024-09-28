@@ -9,3 +9,7 @@ It will prompt for each instance name, domain and choice of ssl or not
 
 Tested and running on ubuntu 24.04 LTS
 
+Use 
+
+Use add-odoo-instance.sh to add more instances
+
