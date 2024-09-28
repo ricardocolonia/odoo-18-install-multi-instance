@@ -13,3 +13,4 @@ Use odoo-multi-install.sh to setup the server for the first time
 
 Use add-odoo-instance.sh to add more instances, needs to be run with sudo
 
+Use remove-odoo-instance.sh to list and remove a selected instance without affecting the others (won't remove the database, only the instance, if you want to remove the database, please do so before running the script)
