@@ -56,7 +56,13 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     echo "Configuring instance $i:"
     read -p "Enter the name for instance $i (e.g., odoo1): " INSTANCE_NAME
     INSTANCE_NAMES[$i]=$INSTANCE_NAME
-
+    # Ask whether the user has an enterprise license for this instance
+    read -p "Do you have an enterprise license for the database of this instance? You will have to enter your license code after installation (yes/no): " ENTERPRISE_CHOICE
+    if [ "$ENTERPRISE_CHOICE" == "yes" ]; then
+        HAS_ENTERPRISE_LICENSE[$i]="True"
+    else
+        HAS_ENTERPRISE_LICENSE[$i]="False"
+    fi  
     # Set OE_PORT and LONGPOLLING_PORT per instance
     OE_PORTS[$i]=$((BASE_ODOO_PORT + i - 1))
     LONGPOLLING_PORTS[$i]=$((BASE_LONGPOLLING_PORT + i - 1))
@@ -244,6 +250,13 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     INSTANCE_DIR="$OE_HOME/$INSTANCE_NAME"
     sudo mkdir -p $INSTANCE_DIR/custom/addons
     sudo chown -R $OE_USER:$OE_USER $INSTANCE_DIR
+
+    # Determine the addons_path based on the enterprise license choice
+    if [ "${HAS_ENTERPRISE_LICENSE[$i]}" == "True" ]; then
+        ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}"
+    else
+        ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons"
+    fi
 
     echo -e "\n---- Creating server config file for instance $INSTANCE_NAME ----"
     sudo sh -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
