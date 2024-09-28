@@ -73,6 +73,14 @@ find_available_port() {
 # Prompt for instance name
 read -p "Enter the name for the new instance (e.g., odoo1): " INSTANCE_NAME
 
+# New prompt for enterprise license
+read -p "Do you have an enterprise license for the database of this instance? You will have to enter your license code after installation (yes/no): " ENTERPRISE_CHOICE
+if [ "$ENTERPRISE_CHOICE" == "yes" ]; then
+    HAS_ENTERPRISE_LICENSE="True"
+else
+    HAS_ENTERPRISE_LICENSE="False"
+fi
+
 # Check if instance already exists
 if [[ " ${EXISTING_INSTANCE_NAMES[@]} " =~ " ${INSTANCE_NAME} " ]]; then
     echo "An instance with the name $INSTANCE_NAME already exists."
@@ -112,6 +120,13 @@ echo -e "\n==== Configuring ODOO Instance $INSTANCE_NAME ===="
 INSTANCE_DIR="$OE_HOME/$INSTANCE_NAME"
 sudo mkdir -p $INSTANCE_DIR/custom/addons
 sudo chown -R $OE_USER:$OE_USER $INSTANCE_DIR
+
+# Determine the addons_path based on the enterprise license choice
+if [ "${HAS_ENTERPRISE_LICENSE[$i]}" == "True" ]; then
+    ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}"
+else
+    ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons"
+fi
 
 echo -e "\n---- Creating server config file for instance $INSTANCE_NAME ----"
 sudo sh -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
