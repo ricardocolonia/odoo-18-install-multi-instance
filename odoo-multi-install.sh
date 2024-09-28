@@ -253,6 +253,7 @@ db_host = False
 db_port = False
 db_user = $OE_USER
 db_password = False
+list_db = False
 xmlrpc_port = ${OE_PORT}
 longpolling_port = ${LONGPOLLING_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
