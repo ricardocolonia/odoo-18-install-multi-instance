@@ -9,7 +9,7 @@ It will prompt for each instance name, domain and choice of ssl or not
 
 Tested and running on ubuntu 24.04 LTS
 
-Use 
+Use odoo-multi-install.sh to setup the server for the first time
 
-Use add-odoo-instance.sh to add more instances
+Use add-odoo-instance.sh to add more instances, needs to be run with sudo
 
