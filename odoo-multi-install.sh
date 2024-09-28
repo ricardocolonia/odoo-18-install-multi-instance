@@ -270,7 +270,7 @@ list_db = False
 xmlrpc_port = ${OE_PORT}
 longpolling_port = ${LONGPOLLING_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
-addons_path=${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}
+addons_path=${ADDONS_PATH}
 EOF
 
     if [ $ENABLE_SSL = "True" ]; then
