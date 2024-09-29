@@ -73,6 +73,15 @@ find_available_port() {
 # Prompt for instance name
 read -p "Enter the name for the new instance (e.g., odoo1): " INSTANCE_NAME
 
+# Function to create PostgreSQL user with random password
+create_postgres_user() {
+    local DB_USER=$INSTANCE_NAME
+    local DB_PASSWORD=$2
+
+    # Switch to postgres user to create the database user
+    sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
+}
+
 # New prompt for enterprise license
 read -p "Do you have an enterprise license for the database of this instance? You will have to enter your license code after installation (yes/no): " ENTERPRISE_CHOICE
 if [ "$ENTERPRISE_CHOICE" == "yes" ]; then
@@ -114,6 +123,12 @@ else
     OE_SUPERADMIN="admin"
 fi
 
+# Generate random password for PostgreSQL user
+DB_PASSWORD=$(generate_random_password)
+
+# Call the function to create PostgreSQL user
+create_postgres_user "$OE_USER" "$DB_PASSWORD"
+
 echo -e "\n==== Configuring ODOO Instance $INSTANCE_NAME ===="
 
 # Create custom addons directory for the instance
@@ -132,11 +147,10 @@ echo -e "\n---- Creating server config file for instance $INSTANCE_NAME ----"
 sudo sh -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
 [options]
 admin_passwd = ${OE_SUPERADMIN}
-db_host = False
-db_port = False
-db_user = $OE_USER
-db_password = False
-list_db = False
+db_host = localhost
+db_user = $INSTANCE_NAME
+db_password = ${DB_PASSWORD}
+;list_db = False
 xmlrpc_port = ${OE_PORT}
 longpolling_port = ${LONGPOLLING_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
@@ -381,13 +395,10 @@ echo "-----------------------------------------------------------"
 echo "Instance $INSTANCE_NAME has been added successfully!"
 echo "Port: $OE_PORT"
 echo "Longpolling Port: $LONGPOLLING_PORT"
-echo "User service: $OE_USER"
+echo "User service: $INSTANCE_NAME"
 echo "Configuration file location: /etc/${OE_CONFIG}.conf"
 echo "Logfile location: /var/log/$OE_USER/${OE_CONFIG}.log"
-echo "User PostgreSQL: $OE_USER"
-echo "Code location: $OE_HOME_EXT"
 echo "Custom addons folder: $OE_HOME/$INSTANCE_NAME/custom/addons/"
-echo "Enterprise addons folder: $ENTERPRISE_ADDONS"
 echo "Password superadmin (database): $OE_SUPERADMIN"
 echo "Start Odoo service: sudo systemctl start ${OE_CONFIG}.service"
 echo "Stop Odoo service: sudo systemctl stop ${OE_CONFIG}.service"
