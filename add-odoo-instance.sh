@@ -350,7 +350,7 @@ DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
   proxy_send_timeout 720s;
 
   # Redirect websocket requests to odoo longpolling port
-  location /longpolling {
+  location /websocket {
     proxy_pass http://odoochat_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
