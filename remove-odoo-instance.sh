@@ -15,15 +15,25 @@
 ################################################################################
 
 OE_USER="odoo"
-OE_HOME="/$OE_USER"
-OE_HOME_EXT="/$OE_USER/${OE_USER}-server"
+OE_HOME="/odoo"  # Changed to match your previous request
+OE_HOME_EXT="/odoo/${OE_USER}-server"
 INSTANCE_CONFIG_PATH="/etc"
 
 # Arrays to store existing instances
 declare -a EXISTING_INSTANCE_NAMES
 
+# Function to terminate active connections to a PostgreSQL database
+terminate_db_connections() {
+    local DB_NAME=$1
+
+    echo "* Terminating active connections to database \"$DB_NAME\""
+    
+    # Terminate connections using pg_terminate_backend
+    sudo -u postgres psql -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME' AND pid <> pg_backend_pid();"
+}
+
 # Gather existing instances
-INSTANCE_CONFIG_FILES=(/etc/${OE_USER}-server-*.conf)
+INSTANCE_CONFIG_FILES=(${INSTANCE_CONFIG_PATH}/${OE_USER}-server-*.conf)
 if [ -f "${INSTANCE_CONFIG_FILES[0]}" ]; then
     for CONFIG_FILE in "${INSTANCE_CONFIG_FILES[@]}"; do
         INSTANCE_NAME=$(basename "$CONFIG_FILE" | sed "s/${OE_USER}-server-//" | sed 's/\.conf//')
@@ -75,14 +85,24 @@ echo "* Removing the systemd service file"
 sudo rm -f $SYSTEMD_SERVICE_FILE
 sudo systemctl daemon-reload
 
-# Remove the PostgreSQL database and user
+# Remove the PostgreSQL databases and user
 echo "* Dropping all databases owned by the PostgreSQL user $DB_USER"
+
+# Fetch all databases owned by the user
 DBS=$(sudo -u postgres psql -t -c "SELECT datname FROM pg_database WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = '$DB_USER');")
 
 for DB in $DBS; do
     # Trim whitespace from the database name
     DB=$(echo $DB | xargs)
     
+    if [[ "$DB" == "postgres" ]]; then
+        echo "* Skipping the default 'postgres' database."
+        continue
+    fi
+
+    # Terminate active connections to the database
+    terminate_db_connections "$DB"
+
     echo "* Dropping database \"$DB\""
     sudo -u postgres psql -c "DROP DATABASE IF EXISTS \"$DB\";"
 done
@@ -106,4 +126,4 @@ if [ -f "$NGINX_CONF_FILE" ]; then
     sudo systemctl reload nginx
 fi
 
-echo "Instance $INSTANCE_NAME has been deleted successfully."
+echo "Instance '$INSTANCE_NAME' has been deleted successfully."
