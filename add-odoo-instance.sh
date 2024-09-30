@@ -26,11 +26,11 @@ OE_VERSION="17.0"
 IS_ENTERPRISE="False"
 GENERATE_RANDOM_PASSWORD="True"
 BASE_ODOO_PORT=8069
-BASE_LONGPOLLING_PORT=9069
+BASE_GEVENT_PORT=8071  # Updated base port for gevent
 
-OE_HOME="/$OE_USER"
-OE_HOME_EXT="/$OE_USER/${OE_USER}-server"
-ENTERPRISE_ADDONS="$OE_HOME/enterprise/addons"
+OE_HOME="/odoo"
+OE_HOME_EXT="${OE_HOME}/${OE_USER}-server"
+ENTERPRISE_ADDONS="${OE_HOME}/enterprise/addons"
 
 # Get server IP address
 SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -38,7 +38,7 @@ SERVER_IP=$(hostname -I | awk '{print $1}')
 # Arrays to store existing instances and ports
 declare -a EXISTING_INSTANCE_NAMES
 declare -a EXISTING_OE_PORTS
-declare -a EXISTING_LONGPOLLING_PORTS
+declare -a EXISTING_GEVENT_PORTS
 
 # Gather existing instances
 INSTANCE_CONFIG_FILES=(/etc/${OE_USER}-server-*.conf)
@@ -47,21 +47,22 @@ if [ -f "${INSTANCE_CONFIG_FILES[0]}" ]; then
         INSTANCE_NAME=$(basename "$CONFIG_FILE" | sed "s/${OE_USER}-server-//" | sed 's/\.conf//')
         EXISTING_INSTANCE_NAMES+=("$INSTANCE_NAME")
         OE_PORT=$(grep "^xmlrpc_port" "$CONFIG_FILE" | awk -F '= ' '{print $2}')
-        LONGPOLLING_PORT=$(grep "^longpolling_port" "$CONFIG_FILE" | awk -F '= ' '{print $2}')
+        GEVENT_PORT=$(grep "^gevent_port" "$CONFIG_FILE" | awk -F '= ' '{print $2}')
         EXISTING_OE_PORTS+=("$OE_PORT")
-        EXISTING_LONGPOLLING_PORTS+=("$LONGPOLLING_PORT")
+        EXISTING_GEVENT_PORTS+=("$GEVENT_PORT")
     done
 else
     echo "No existing Odoo instances found."
 fi
 
-# Find available ports
+# Find available ports (improved port checking logic)
 find_available_port() {
     local BASE_PORT=$1
     local -n EXISTING_PORTS=$2
     local PORT=$BASE_PORT
     while true; do
-        if [[ " ${EXISTING_PORTS[@]} " =~ " $PORT " ]]; then
+        # Check if the port is in use or in the list of existing ports
+        if [[ " ${EXISTING_PORTS[@]} " =~ " $PORT " ]] || lsof -i TCP:$PORT >/dev/null 2>&1; then
             PORT=$((PORT + 1))
         else
             echo "$PORT"
@@ -75,16 +76,26 @@ read -p "Enter the name for the new instance (e.g., odoo1): " INSTANCE_NAME
 
 # Function to create PostgreSQL user with random password
 create_postgres_user() {
-    local DB_USER=$INSTANCE_NAME
+    local DB_USER=$1
     local DB_PASSWORD=$2
 
-    # Switch to postgres user to create the database user
-    sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
+    # Check if PostgreSQL user already exists
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1
+    if [ $? -eq 0 ]; then
+        echo "PostgreSQL user '$DB_USER' already exists. Skipping creation."
+    else
+        # Create the database user
+        sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
+        if [ $? -ne 0 ]; then
+            echo "Failed to create PostgreSQL user '$DB_USER'. Exiting."
+            exit 1
+        fi
+    fi
 }
 
 # New prompt for enterprise license
 read -p "Do you have an enterprise license for the database of this instance? You will have to enter your license code after installation (yes/no): " ENTERPRISE_CHOICE
-if [ "$ENTERPRISE_CHOICE" == "yes" ]; then
+if [[ "$ENTERPRISE_CHOICE" =~ ^(yes|y)$ ]]; then
     HAS_ENTERPRISE_LICENSE="True"
 else
     HAS_ENTERPRISE_LICENSE="False"
@@ -92,7 +103,7 @@ fi
 
 # Check if instance already exists
 if [[ " ${EXISTING_INSTANCE_NAMES[@]} " =~ " ${INSTANCE_NAME} " ]]; then
-    echo "An instance with the name $INSTANCE_NAME already exists."
+    echo "An instance with the name '$INSTANCE_NAME' already exists. Please choose a different name."
     exit 1
 fi
 
@@ -101,11 +112,11 @@ OE_CONFIG="${OE_USER}-server-${INSTANCE_NAME}"
 
 # Find available ports
 OE_PORT=$(find_available_port $BASE_ODOO_PORT EXISTING_OE_PORTS)
-LONGPOLLING_PORT=$(find_available_port $BASE_LONGPOLLING_PORT EXISTING_LONGPOLLING_PORTS)
+GEVENT_PORT=$(find_available_port $BASE_GEVENT_PORT EXISTING_GEVENT_PORTS)
 
 # Ask whether to enable SSL for this instance
-read -p "Do you want to enable SSL with Certbot for instance $INSTANCE_NAME? (yes/no): " SSL_CHOICE
-if [ "$SSL_CHOICE" == "yes" ]; then
+read -p "Do you want to enable SSL with Certbot for instance '$INSTANCE_NAME'? (yes/no): " SSL_CHOICE
+if [[ "$SSL_CHOICE" =~ ^(yes|y)$ ]]; then
     ENABLE_SSL="True"
     # Prompt for domain name and admin email
     read -p "Enter the domain name for the instance (e.g., odoo.mycompany.com): " WEBSITE_NAME
@@ -117,42 +128,60 @@ else
 fi
 
 # Generate OE_SUPERADMIN
-if [ $GENERATE_RANDOM_PASSWORD = "True" ]; then
+if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
     OE_SUPERADMIN=$(generate_random_password)
 else
-    OE_SUPERADMIN="admin"
+    read -s -p "Enter the superadmin password for the database: " OE_SUPERADMIN
+    echo
 fi
 
 # Generate random password for PostgreSQL user
 DB_PASSWORD=$(generate_random_password)
 
 # Call the function to create PostgreSQL user
-create_postgres_user "$OE_USER" "$DB_PASSWORD"
+create_postgres_user "$INSTANCE_NAME" "$DB_PASSWORD"
 
-echo -e "\n==== Configuring ODOO Instance $INSTANCE_NAME ===="
+echo -e "\n==== Configuring ODOO Instance '$INSTANCE_NAME' ===="
 
 # Create custom addons directory for the instance
-INSTANCE_DIR="$OE_HOME/$INSTANCE_NAME"
-sudo mkdir -p $INSTANCE_DIR/custom/addons
-sudo chown -R $OE_USER:$OE_USER $INSTANCE_DIR
+INSTANCE_DIR="${OE_HOME}/${INSTANCE_NAME}"
+sudo mkdir -p "${INSTANCE_DIR}/custom/addons"
+sudo chown -R $OE_USER:$OE_USER "${INSTANCE_DIR}"
+
+# Create a virtual environment for the instance
+INSTANCE_VENV="${INSTANCE_DIR}/venv"
+echo "Creating a virtual environment for instance '$INSTANCE_NAME'..."
+sudo -u $OE_USER python3 -m venv "$INSTANCE_VENV"
+if [ $? -ne 0 ]; then
+    echo "Failed to create virtual environment. Exiting."
+    exit 1
+fi
+
+# Activate and install required dependencies
+echo "Installing Python dependencies in the virtual environment..."
+sudo -u $OE_USER bash -c "source ${INSTANCE_VENV}/bin/activate && pip install --upgrade pip && pip install -r ${OE_HOME_EXT}/requirements.txt"
+if [ $? -ne 0 ]; then
+    echo "Failed to install Python dependencies. Exiting."
+    exit 1
+fi
 
 # Determine the addons_path based on the enterprise license choice
-if [ "${HAS_ENTERPRISE_LICENSE[$i]}" == "True" ]; then
+if [ "$HAS_ENTERPRISE_LICENSE" = "True" ]; then
     ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}"
 else
     ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons"
 fi
 
-echo -e "\n---- Creating server config file for instance $INSTANCE_NAME ----"
+echo -e "\n---- Creating server config file for instance '$INSTANCE_NAME' ----"
 sudo sh -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
 [options]
 admin_passwd = ${OE_SUPERADMIN}
 db_host = localhost
-db_user = $INSTANCE_NAME
+db_user = ${INSTANCE_NAME}
 db_password = ${DB_PASSWORD}
 ;list_db = False
 xmlrpc_port = ${OE_PORT}
-gevent_port = ${LONGPOLLING_PORT}
+gevent_port = ${GEVENT_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
 addons_path=${ADDONS_PATH}
 limit_memory_hard = 1677721600
@@ -164,7 +193,7 @@ max_cron_threads = 1
 workers = 2
 EOF
 
-if [ $ENABLE_SSL = "True" ]; then
+if [ "$ENABLE_SSL" = "True" ]; then
     sudo sh -c "echo 'dbfilter = ^%h\$' >> /etc/${OE_CONFIG}.conf"
     sudo sh -c "echo 'proxy_mode = True' >> /etc/${OE_CONFIG}.conf"
 fi
@@ -173,8 +202,9 @@ sudo chown $OE_USER:$OE_USER /etc/${OE_CONFIG}.conf
 sudo chmod 640 /etc/${OE_CONFIG}.conf
 
 # Create systemd service file for the instance
-echo -e "* Creating systemd service file for instance $INSTANCE_NAME"
-cat <<EOF > ~/${OE_CONFIG}.service
+echo -e "\n---- Creating systemd service file for instance '$INSTANCE_NAME' ----"
+SERVICE_FILE="${OE_CONFIG}.service"
+sudo bash -c "cat > /etc/systemd/system/${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Odoo Open Source ERP and CRM - Instance ${INSTANCE_NAME}
 After=network.target
@@ -185,54 +215,53 @@ SyslogIdentifier=${OE_CONFIG}
 PermissionsStartOnly=true
 User=${OE_USER}
 Group=${OE_USER}
-ExecStart=${OE_HOME}/venv/bin/python ${OE_HOME_EXT}/odoo-bin -c /etc/${OE_CONFIG}.conf
+ExecStart=${INSTANCE_VENV}/bin/python ${OE_HOME_EXT}/odoo-bin -c /etc/${OE_CONFIG}.conf
 WorkingDirectory=${OE_HOME_EXT}
 StandardOutput=journal+console
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-sudo mv ~/${OE_CONFIG}.service /etc/systemd/system/${OE_CONFIG}.service
-sudo chmod 644 /etc/systemd/system/${OE_CONFIG}.service
-sudo chown root: /etc/systemd/system/${OE_CONFIG}.service
-
-echo -e "* Starting ODOO service for instance $INSTANCE_NAME"
+# Reload systemd daemon and start the service
+echo -e "\n---- Starting ODOO service for instance '$INSTANCE_NAME' ----"
 sudo systemctl daemon-reload
-sudo systemctl enable ${OE_CONFIG}.service
-sudo systemctl start ${OE_CONFIG}.service
+sudo systemctl enable ${SERVICE_FILE}
+sudo systemctl start ${SERVICE_FILE}
 
 # Check if the service started successfully
-sudo systemctl is-active --quiet ${OE_CONFIG}.service
+sudo systemctl is-active --quiet ${SERVICE_FILE}
 if [ $? -ne 0 ]; then
-    echo "Service ${OE_CONFIG}.service failed to start. Please check the logs."
-    sudo journalctl -u ${OE_CONFIG}.service --no-pager
+    echo "Service ${SERVICE_FILE} failed to start. Please check the logs."
+    sudo journalctl -u ${SERVICE_FILE} --no-pager
     exit 1
 fi
 
 #--------------------------------------------------
 # Configure Nginx for this instance
 #--------------------------------------------------
-if [ $ENABLE_SSL = "True" ]; then
-    echo -e "\n---- Configuring Nginx for instance $INSTANCE_NAME ----"
+if [ "$ENABLE_SSL" = "True" ]; then
+    echo -e "\n---- Configuring Nginx for instance '$INSTANCE_NAME' with SSL ----"
+    sudo apt update
     sudo apt install nginx -y
 
     NGINX_CONF_FILE="/etc/nginx/sites-available/${WEBSITE_NAME}"
     # Remove existing Nginx configuration if it exists
     if [ -f "$NGINX_CONF_FILE" ]; then
-        echo "Existing Nginx configuration for $WEBSITE_NAME found. Removing it."
+        echo "Existing Nginx configuration for '$WEBSITE_NAME' found. Removing it."
         sudo rm -f "$NGINX_CONF_FILE"
         sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}"
     fi
 
     # Create initial Nginx configuration without SSL
-    cat <<EOF > ~/${WEBSITE_NAME}
+    sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
 # Odoo server
 upstream odoo_${INSTANCE_NAME} {
   server 127.0.0.1:${OE_PORT};
 }
-upstream odoochat_${INSTANCE_NAME} {
-  server 127.0.0.1:${LONGPOLLING_PORT};
+upstream odoo_websocket_${INSTANCE_NAME} {
+  server 127.0.0.1:${GEVENT_PORT};
 }
 map \$http_upgrade \$connection_upgrade {
   default upgrade;
@@ -250,9 +279,9 @@ server {
   proxy_connect_timeout 720s;
   proxy_send_timeout 720s;
 
-  # Redirect websocket requests to odoo longpolling port
+  # Redirect websocket requests to odoo gevent port
   location /websocket {
-    proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_pass http://odoo_websocket_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
     proxy_set_header X-Forwarded-Host \$host;
@@ -277,10 +306,9 @@ server {
 }
 EOF
 
-    sudo mv ~/${WEBSITE_NAME} $NGINX_CONF_FILE
-    sudo ln -s $NGINX_CONF_FILE /etc/nginx/sites-enabled/${WEBSITE_NAME}
+    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${WEBSITE_NAME}
 
-    echo "Nginx configuration for instance $INSTANCE_NAME is created at $NGINX_CONF_FILE"
+    echo "Nginx configuration for instance '$INSTANCE_NAME' is created at $NGINX_CONF_FILE"
 
     # Test Nginx configuration
     sudo nginx -t
@@ -295,52 +323,55 @@ EOF
     #--------------------------------------------------
     # Enable SSL with Certbot
     #--------------------------------------------------
-    echo -e "\n---- Setting up SSL certificates ----"
-    sudo apt-get update -y
+    echo -e "\n---- Setting up SSL certificates with Certbot ----"
     sudo apt install snapd -y
     sudo snap install core; sudo snap refresh core
     sudo snap install --classic certbot
     sudo ln -sf /snap/bin/certbot /usr/bin/certbot
 
     # Obtain SSL certificates
-    sudo certbot certonly --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL
+    sudo certbot --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL --redirect
 
-    # Create Nginx configuration with SSL
-    cat <<EOF > ~/${WEBSITE_NAME}
+    if [ $? -ne 0 ]; then
+        echo "Certbot failed to obtain SSL certificates. Please check the domain and email address."
+        exit 1
+    fi
+
+    echo "SSL certificates obtained and Nginx configured for HTTPS."
+
+else
+    echo "Nginx isn't configured for instance '$INSTANCE_NAME' due to user's choice of not enabling SSL."
+
+    # If SSL is not enabled, still configure Nginx without SSL
+    echo -e "\n---- Configuring Nginx for instance '$INSTANCE_NAME' without SSL ----"
+    sudo apt update
+    sudo apt install nginx -y
+
+    NGINX_CONF_FILE="/etc/nginx/sites-available/${INSTANCE_NAME}"
+    # Remove existing Nginx configuration if it exists
+    if [ -f "$NGINX_CONF_FILE" ]; then
+        echo "Existing Nginx configuration for '$INSTANCE_NAME' found. Removing it."
+        sudo rm -f "$NGINX_CONF_FILE"
+        sudo rm -f "/etc/nginx/sites-enabled/${INSTANCE_NAME}"
+    fi
+
+    # Create Nginx configuration without SSL
+    sudo bash -c "cat > /etc/nginx/sites-available/${INSTANCE_NAME}" <<EOF
 # Odoo server
 upstream odoo_${INSTANCE_NAME} {
   server 127.0.0.1:${OE_PORT};
 }
-upstream odoochat_${INSTANCE_NAME} {
-  server 127.0.0.1:${LONGPOLLING_PORT};
+upstream odoo_websocket_${INSTANCE_NAME} {
+  server 127.0.0.1:${GEVENT_PORT};
 }
 map \$http_upgrade \$connection_upgrade {
   default upgrade;
   ''      close;
 }
 
-# Redirect all HTTP traffic to HTTPS
 server {
   listen 80;
-  server_name ${WEBSITE_NAME};
-
-  return 301 https://\$host\$request_uri;
-}
-
-# Handle HTTPS traffic
-server {
-  listen 443 ssl;
-  server_name ${WEBSITE_NAME};
-
-  ssl_certificate /etc/letsencrypt/live/${WEBSITE_NAME}/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/${WEBSITE_NAME}/privkey.pem;
-  ssl_session_timeout 30m;
-  ssl_protocols TLSv1.2 TLSv1.3;
-  ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
-DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
-  ssl_prefer_server_ciphers off;
+  server_name ${SERVER_IP};
 
   access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
   error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
@@ -349,20 +380,18 @@ DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
   proxy_connect_timeout 720s;
   proxy_send_timeout 720s;
 
-  # Redirect websocket requests to odoo longpolling port
+  # Redirect websocket requests to odoo gevent port
   location /websocket {
-    proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_pass http://odoo_websocket_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
     proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
-    proxy_cookie_flags session_id samesite=lax secure;
   }
 
-  # Redirect requests to Odoo backend server
+  # Redirect requests to odoo backend server
   location / {
     proxy_pass http://odoo_${INSTANCE_NAME};
     proxy_set_header X-Forwarded-Host \$host;
@@ -370,8 +399,6 @@ DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_redirect off;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
-    proxy_cookie_flags session_id samesite=lax secure;
   }
 
   # Gzip settings
@@ -380,41 +407,46 @@ DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
 }
 EOF
 
-    sudo mv ~/${WEBSITE_NAME} $NGINX_CONF_FILE
+    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${INSTANCE_NAME}
+
+    echo "Nginx configuration for instance '$INSTANCE_NAME' is created at $NGINX_CONF_FILE"
 
     # Test Nginx configuration
     sudo nginx -t
     if [ $? -ne 0 ]; then
-        echo "Nginx configuration test failed after adding SSL. Please check the configuration."
+        echo "Nginx configuration test failed. Please check the configuration."
         exit 1
     fi
 
-    # Reload Nginx
-    sudo systemctl reload nginx
+    # Restart Nginx
+    sudo systemctl restart nginx
 
-    echo "Done! The Nginx server is up and running with SSL for instance $INSTANCE_NAME."
-
-else
-    echo "Nginx isn't configured for instance $INSTANCE_NAME due to choice of the user!"
+    echo "Nginx configuration without SSL is up and running for instance '$INSTANCE_NAME'."
 fi
 
 echo "-----------------------------------------------------------"
-echo "Instance $INSTANCE_NAME has been added successfully!"
+echo "Instance '$INSTANCE_NAME' has been added successfully!"
 echo "Port: $OE_PORT"
-echo "Gevent Port: $LONGPOLLING_PORT"
-echo "User service: $INSTANCE_NAME"
+echo "Gevent Port: $GEVENT_PORT"
+echo "Service name: ${SERVICE_FILE}"
 echo "Configuration file location: /etc/${OE_CONFIG}.conf"
-echo "Logfile location: /var/log/$OE_USER/${OE_CONFIG}.log"
-echo "Custom addons folder: $OE_HOME/$INSTANCE_NAME/custom/addons/"
-echo "Password superadmin (database): $OE_SUPERADMIN"
-echo "Start Odoo service: sudo systemctl start ${OE_CONFIG}.service"
-echo "Stop Odoo service: sudo systemctl stop ${OE_CONFIG}.service"
-echo "Restart Odoo service: sudo systemctl restart ${OE_CONFIG}.service"
+echo "Logfile location: /var/log/${OE_USER}/${OE_CONFIG}.log"
+echo "Custom addons folder: ${INSTANCE_DIR}/custom/addons/"
+echo "Database user: $INSTANCE_NAME"
+echo "Database password: $DB_PASSWORD"
+echo "Superadmin password: $OE_SUPERADMIN"
+echo ""
+echo "Manage Odoo service with the following commands:"
+echo "  Start:   sudo systemctl start ${SERVICE_FILE}"
+echo "  Stop:    sudo systemctl stop ${SERVICE_FILE}"
+echo "  Restart: sudo systemctl restart ${SERVICE_FILE}"
+echo ""
 
-if [ $ENABLE_SSL = "True" ]; then
+if [ "$ENABLE_SSL" = "True" ]; then
     echo "Nginx configuration file: /etc/nginx/sites-available/${WEBSITE_NAME}"
     echo "Access URL: https://${WEBSITE_NAME}"
 else
+    echo "Nginx configuration file: /etc/nginx/sites-available/${INSTANCE_NAME}"
     echo "Access URL: http://${SERVER_IP}:${OE_PORT}"
 fi
 echo "-----------------------------------------------------------"
