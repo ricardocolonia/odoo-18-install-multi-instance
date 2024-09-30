@@ -42,6 +42,8 @@ declare -a LONGPOLLING_PORTS
 declare -a WEBSITE_NAMES
 declare -a OE_SUPERADMINS
 declare -a ENABLE_SSLS
+declare -a DB_PASSWORDS
+declare -a HAS_ENTERPRISE_LICENSE
 
 # Base directories
 OE_HOME="/$OE_USER"
@@ -62,7 +64,7 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
         HAS_ENTERPRISE_LICENSE[$i]="True"
     else
         HAS_ENTERPRISE_LICENSE[$i]="False"
-    fi  
+    fi
     # Set OE_PORT and LONGPOLLING_PORT per instance
     OE_PORTS[$i]=$((BASE_ODOO_PORT + i - 1))
     LONGPOLLING_PORTS[$i]=$((BASE_LONGPOLLING_PORT + i - 1))
@@ -93,6 +95,14 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
         OE_SUPERADMIN="admin"
     fi
     OE_SUPERADMINS[$i]=$OE_SUPERADMIN
+
+    # Generate DB_PASSWORD per instance
+    DB_PASSWORD=$(generate_random_password)
+    DB_PASSWORDS[$i]=$DB_PASSWORD
+
+    # Call the function to create PostgreSQL user
+    create_postgres_user $INSTANCE_NAME $DB_PASSWORD
+
 done
 
 #--------------------------------------------------
@@ -136,26 +146,6 @@ else
     echo -e "\n---- Installing the default PostgreSQL version ----"
     sudo apt-get install postgresql postgresql-server-dev-all -y
 fi
-
-echo -e "\n---- Creating the ODOO PostgreSQL User ----"
-sudo su - postgres -c "createuser -s $OE_USER" 2> /dev/null || true
-
-#--------------------------------------------------
-# Adjust PostgreSQL Configuration for Passwordless Connections
-#--------------------------------------------------
-echo -e "\n---- Adjusting PostgreSQL configuration ----"
-PG_VERSION=$(psql -V | awk '{print $3}' | cut -d. -f1)
-PG_HBA_FILE="/etc/postgresql/$PG_VERSION/main/pg_hba.conf"
-
-# Backup the original pg_hba.conf file
-sudo cp $PG_HBA_FILE ${PG_HBA_FILE}.bak
-
-# Allow the 'odoo' user to connect via 'peer' authentication
-# Insert the rule at the top of the file for higher priority
-sudo sed -i "1ilocal   all             $OE_USER                                peer" $PG_HBA_FILE
-
-# Reload PostgreSQL configuration
-sudo systemctl reload postgresql
 
 #--------------------------------------------------
 # Create ODOO system user
@@ -235,6 +225,16 @@ fi
 #--------------------------------------------------
 # Install ODOO Instances
 #--------------------------------------------------
+
+# Function to create PostgreSQL user with random password
+create_postgres_user() {
+    local DB_USER=$1
+    local DB_PASSWORD=$2
+
+    # Switch to postgres user to create the database user
+    sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
+}
+
 for ((i=1; i<=INSTANCE_COUNT; i++)); do
     INSTANCE_NAME=${INSTANCE_NAMES[$i]}
     OE_PORT=${OE_PORTS[$i]}
@@ -243,6 +243,8 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     OE_SUPERADMIN=${OE_SUPERADMINS[$i]}
     WEBSITE_NAME=${WEBSITE_NAMES[$i]}
     ENABLE_SSL=${ENABLE_SSLS[$i]}
+    DB_PASSWORD=${DB_PASSWORDS[$i]}
+    HAS_ENTERPRISE=${HAS_ENTERPRISE_LICENSE[$i]}
 
     echo -e "\n==== Configuring ODOO Instance $INSTANCE_NAME ===="
 
@@ -252,7 +254,7 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     sudo chown -R $OE_USER:$OE_USER $INSTANCE_DIR
 
     # Determine the addons_path based on the enterprise license choice
-    if [ "${HAS_ENTERPRISE_LICENSE[$i]}" == "True" ]; then
+    if [ "$HAS_ENTERPRISE" == "True" ]; then
         ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}"
     else
         ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons"
@@ -262,11 +264,10 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     sudo sh -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
 [options]
 admin_passwd = ${OE_SUPERADMIN}
-db_host = False
-db_port = False
-db_user = $OE_USER
-db_password = False
-list_db = False
+db_host = localhost
+db_user = $INSTANCE_NAME
+db_password = ${DB_PASSWORD}
+;list_db = False
 xmlrpc_port = ${OE_PORT}
 longpolling_port = ${LONGPOLLING_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
@@ -551,18 +552,17 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     OE_SUPERADMIN=${OE_SUPERADMINS[$i]}
     WEBSITE_NAME=${WEBSITE_NAMES[$i]}
     ENABLE_SSL=${ENABLE_SSLS[$i]}
+    DB_PASSWORD=${DB_PASSWORDS[$i]}
 
     echo "-----------------------------------------------------------"
     echo "Instance $INSTANCE_NAME:"
     echo "Port: $OE_PORT"
     echo "Longpolling Port: $LONGPOLLING_PORT"
-    echo "User service: $OE_USER"
     echo "Configuration file location: /etc/${OE_CONFIG}.conf"
     echo "Logfile location: /var/log/$OE_USER/${OE_CONFIG}.log"
-    echo "User PostgreSQL: $OE_USER"
+    echo "Database user: $INSTANCE_NAME"
     echo "Code location: $OE_HOME_EXT"
     echo "Custom addons folder: $OE_HOME/$INSTANCE_NAME/custom/addons/"
-    echo "Enterprise addons folder: $ENTERPRISE_ADDONS"
     echo "Password superadmin (database): $OE_SUPERADMIN"
     echo "Start Odoo service: sudo systemctl start ${OE_CONFIG}.service"
     echo "Stop Odoo service: sudo systemctl stop ${OE_CONFIG}.service"
