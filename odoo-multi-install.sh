@@ -99,10 +99,7 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     # Generate DB_PASSWORD per instance
     DB_PASSWORD=$(generate_random_password)
     DB_PASSWORDS[$i]=$DB_PASSWORD
-
-    # Call the function to create PostgreSQL user
-    create_postgres_user $INSTANCE_NAME $DB_PASSWORD
-
+    
 done
 
 #--------------------------------------------------
@@ -234,6 +231,9 @@ create_postgres_user() {
     # Switch to postgres user to create the database user
     sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
 }
+
+# Call the function to create PostgreSQL user
+create_postgres_user $INSTANCE_NAME $DB_PASSWORD
 
 for ((i=1; i<=INSTANCE_COUNT; i++)); do
     INSTANCE_NAME=${INSTANCE_NAMES[$i]}
