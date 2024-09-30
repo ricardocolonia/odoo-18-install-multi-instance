@@ -76,11 +76,19 @@ sudo rm -f $SYSTEMD_SERVICE_FILE
 sudo systemctl daemon-reload
 
 # Remove the PostgreSQL database and user
-echo "* Dropping the PostgreSQL database"
-sudo -u postgres psql -c "DROP DATABASE IF EXISTS $INSTANCE_NAME;"
+echo "* Dropping all databases owned by the PostgreSQL user $DB_USER"
+DBS=$(sudo -u postgres psql -t -c "SELECT datname FROM pg_database WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = '$DB_USER');")
+
+for DB in $DBS; do
+    # Trim whitespace from the database name
+    DB=$(echo $DB | xargs)
+    
+    echo "* Dropping database \"$DB\""
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS \"$DB\";"
+done
 
 echo "* Dropping the PostgreSQL user"
-sudo -u postgres psql -c "DROP USER IF EXISTS $INSTANCE_NAME;"
+sudo -u postgres psql -c "DROP USER IF EXISTS $DB_USER;"
 
 # Remove the Odoo configuration file
 echo "* Removing the Odoo configuration file"
@@ -99,4 +107,3 @@ if [ -f "$NGINX_CONF_FILE" ]; then
 fi
 
 echo "Instance $INSTANCE_NAME has been deleted successfully."
-
