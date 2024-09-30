@@ -152,7 +152,7 @@ db_user = $INSTANCE_NAME
 db_password = ${DB_PASSWORD}
 ;list_db = False
 xmlrpc_port = ${OE_PORT}
-longpolling_port = ${LONGPOLLING_PORT}
+gevent-port = ${LONGPOLLING_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
 addons_path=${ADDONS_PATH}
 EOF
@@ -394,7 +394,7 @@ fi
 echo "-----------------------------------------------------------"
 echo "Instance $INSTANCE_NAME has been added successfully!"
 echo "Port: $OE_PORT"
-echo "Longpolling Port: $LONGPOLLING_PORT"
+echo "Gevent Port: $LONGPOLLING_PORT"
 echo "User service: $INSTANCE_NAME"
 echo "Configuration file location: /etc/${OE_CONFIG}.conf"
 echo "Logfile location: /var/log/$OE_USER/${OE_CONFIG}.log"
