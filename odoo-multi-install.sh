@@ -276,6 +276,13 @@ xmlrpc_port = ${OE_PORT}
 gevent_port = ${LONGPOLLING_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
 addons_path=${ADDONS_PATH}
+limit_memory_hard = 1677721600
+limit_memory_soft = 629145600
+limit_request = 8192
+limit_time_cpu = 600
+limit_time_real = 1200
+max_cron_threads = 1
+workers = 2
 EOF
 
     if [ $ENABLE_SSL = "True" ]; then
@@ -365,7 +372,7 @@ server {
   proxy_send_timeout 720s;
 
   # Redirect websocket requests to odoo longpolling port
-  location /longpolling {
+  location /websocket {
     proxy_pass http://odoochat_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
@@ -496,7 +503,7 @@ DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
   proxy_send_timeout 720s;
 
   # Redirect websocket requests to odoo longpolling port
-  location /longpolling {
+  location /websocket {
     proxy_pass http://odoochat_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
