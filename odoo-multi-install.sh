@@ -20,6 +20,20 @@ generate_random_password() {
     openssl rand -base64 16
 }
 
+# Function to create PostgreSQL user with random password
+create_postgres_user() {
+    local DB_USER=$1
+    local DB_PASSWORD=$2
+
+    # Check if the user already exists
+    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
+        echo "PostgreSQL user $DB_USER already exists."
+    else
+        # Create the user
+        sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
+    fi
+}
+
 # Base variables
 OE_USER="odoo"
 INSTALL_WKHTMLTOPDF="True"
@@ -99,7 +113,10 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     # Generate DB_PASSWORD per instance
     DB_PASSWORD=$(generate_random_password)
     DB_PASSWORDS[$i]=$DB_PASSWORD
-    
+
+    # Call the function to create PostgreSQL user for this instance
+    create_postgres_user $INSTANCE_NAME $DB_PASSWORD
+
 done
 
 #--------------------------------------------------
@@ -222,19 +239,6 @@ fi
 #--------------------------------------------------
 # Install ODOO Instances
 #--------------------------------------------------
-
-# Function to create PostgreSQL user with random password
-create_postgres_user() {
-    local DB_USER=$1
-    local DB_PASSWORD=$2
-
-    # Switch to postgres user to create the database user
-    sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
-}
-
-# Call the function to create PostgreSQL user
-create_postgres_user $INSTANCE_NAME $DB_PASSWORD
-
 for ((i=1; i<=INSTANCE_COUNT; i++)); do
     INSTANCE_NAME=${INSTANCE_NAMES[$i]}
     OE_PORT=${OE_PORTS[$i]}
@@ -561,6 +565,7 @@ for ((i=1; i<=INSTANCE_COUNT; i++)); do
     echo "Configuration file location: /etc/${OE_CONFIG}.conf"
     echo "Logfile location: /var/log/$OE_USER/${OE_CONFIG}.log"
     echo "Database user: $INSTANCE_NAME"
+    echo "Database password: ${DB_PASSWORD}"
     echo "Code location: $OE_HOME_EXT"
     echo "Custom addons folder: $OE_HOME/$INSTANCE_NAME/custom/addons/"
     echo "Password superadmin (database): $OE_SUPERADMIN"
