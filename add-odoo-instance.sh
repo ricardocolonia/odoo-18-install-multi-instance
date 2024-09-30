@@ -14,10 +14,20 @@
 #    sudo ./add-odoo-instance.sh
 ################################################################################
 
+# Exit immediately if a command exits with a non-zero status
+set -e
+
 # Function to generate a random password
 generate_random_password() {
     openssl rand -base64 16
 }
+
+# Ensure lsof is installed
+if ! command -v lsof &> /dev/null; then
+    echo "lsof could not be found. Installing lsof..."
+    sudo apt update
+    sudo apt install lsof -y
+fi
 
 # Base variables
 OE_USER="odoo"
@@ -26,7 +36,7 @@ OE_VERSION="17.0"
 IS_ENTERPRISE="False"
 GENERATE_RANDOM_PASSWORD="True"
 BASE_ODOO_PORT=8069
-BASE_GEVENT_PORT=8071  # Updated base port for gevent
+BASE_GEVENT_PORT=9069  # Updated base port for gevent
 
 OE_HOME="/odoo"
 OE_HOME_EXT="${OE_HOME}/${OE_USER}-server"
@@ -55,7 +65,7 @@ else
     echo "No existing Odoo instances found."
 fi
 
-# Find available ports (improved port checking logic)
+# Function to find an available port
 find_available_port() {
     local BASE_PORT=$1
     local -n EXISTING_PORTS=$2
@@ -74,26 +84,28 @@ find_available_port() {
 # Prompt for instance name
 read -p "Enter the name for the new instance (e.g., odoo1): " INSTANCE_NAME
 
+# Validate instance name
+if [[ ! "$INSTANCE_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Invalid instance name. Only letters, numbers, underscores, and hyphens are allowed."
+    exit 1
+fi
+
 # Function to create PostgreSQL user with random password
 create_postgres_user() {
     local DB_USER=$1
     local DB_PASSWORD=$2
 
     # Check if PostgreSQL user already exists
-    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1
-    if [ $? -eq 0 ]; then
+    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
         echo "PostgreSQL user '$DB_USER' already exists. Skipping creation."
     else
         # Create the database user
         sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
-        if [ $? -ne 0 ]; then
-            echo "Failed to create PostgreSQL user '$DB_USER'. Exiting."
-            exit 1
-        fi
+        echo "PostgreSQL user '$DB_USER' created successfully."
     fi
 }
 
-# New prompt for enterprise license
+# Prompt for enterprise license
 read -p "Do you have an enterprise license for the database of this instance? You will have to enter your license code after installation (yes/no): " ENTERPRISE_CHOICE
 if [[ "$ENTERPRISE_CHOICE" =~ ^(yes|y)$ ]]; then
     HAS_ENTERPRISE_LICENSE="True"
@@ -114,6 +126,10 @@ OE_CONFIG="${OE_USER}-server-${INSTANCE_NAME}"
 OE_PORT=$(find_available_port $BASE_ODOO_PORT EXISTING_OE_PORTS)
 GEVENT_PORT=$(find_available_port $BASE_GEVENT_PORT EXISTING_GEVENT_PORTS)
 
+echo "Assigned Ports:"
+echo "  xmlrpc_port: $OE_PORT"
+echo "  gevent_port: $GEVENT_PORT"
+
 # Ask whether to enable SSL for this instance
 read -p "Do you want to enable SSL with Certbot for instance '$INSTANCE_NAME'? (yes/no): " SSL_CHOICE
 if [[ "$SSL_CHOICE" =~ ^(yes|y)$ ]]; then
@@ -121,6 +137,18 @@ if [[ "$SSL_CHOICE" =~ ^(yes|y)$ ]]; then
     # Prompt for domain name and admin email
     read -p "Enter the domain name for the instance (e.g., odoo.mycompany.com): " WEBSITE_NAME
     read -p "Enter your email address for SSL certificate registration: " ADMIN_EMAIL
+
+    # Validate domain name
+    if [[ ! "$WEBSITE_NAME" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        echo "Invalid domain name."
+        exit 1
+    fi
+
+    # Validate email
+    if ! [[ "$ADMIN_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        echo "Invalid email address."
+        exit 1
+    fi
 else
     ENABLE_SSL="False"
     # No SSL, so we won't prompt for domain name
@@ -130,6 +158,7 @@ fi
 # Generate OE_SUPERADMIN
 if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
     OE_SUPERADMIN=$(generate_random_password)
+    echo "Generated random superadmin password."
 else
     read -s -p "Enter the superadmin password for the database: " OE_SUPERADMIN
     echo
@@ -137,8 +166,9 @@ fi
 
 # Generate random password for PostgreSQL user
 DB_PASSWORD=$(generate_random_password)
+echo "Generated random PostgreSQL password."
 
-# Call the function to create PostgreSQL user
+# Create PostgreSQL user
 create_postgres_user "$INSTANCE_NAME" "$DB_PASSWORD"
 
 echo -e "\n==== Configuring ODOO Instance '$INSTANCE_NAME' ===="
@@ -173,7 +203,7 @@ else
 fi
 
 echo -e "\n---- Creating server config file for instance '$INSTANCE_NAME' ----"
-sudo sh -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
+sudo bash -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
 [options]
 admin_passwd = ${OE_SUPERADMIN}
 db_host = localhost
@@ -194,8 +224,8 @@ workers = 2
 EOF
 
 if [ "$ENABLE_SSL" = "True" ]; then
-    sudo sh -c "echo 'dbfilter = ^%h\$' >> /etc/${OE_CONFIG}.conf"
-    sudo sh -c "echo 'proxy_mode = True' >> /etc/${OE_CONFIG}.conf"
+    sudo bash -c "echo 'dbfilter = ^%h\$' >> /etc/${OE_CONFIG}.conf"
+    sudo bash -c "echo 'proxy_mode = True' >> /etc/${OE_CONFIG}.conf"
 fi
 
 sudo chown $OE_USER:$OE_USER /etc/${OE_CONFIG}.conf
@@ -238,6 +268,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+echo "Odoo service for instance '$INSTANCE_NAME' started successfully."
+
 #--------------------------------------------------
 # Configure Nginx for this instance
 #--------------------------------------------------
@@ -251,10 +283,10 @@ if [ "$ENABLE_SSL" = "True" ]; then
     if [ -f "$NGINX_CONF_FILE" ]; then
         echo "Existing Nginx configuration for '$WEBSITE_NAME' found. Removing it."
         sudo rm -f "$NGINX_CONF_FILE"
-        sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}"
+        sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}" || true
     fi
 
-    # Create initial Nginx configuration without SSL
+    # Create Nginx configuration with SSL
     sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
 # Odoo server
 upstream odoo_${INSTANCE_NAME} {
@@ -275,9 +307,14 @@ server {
   access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
   error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
 
-  proxy_read_timeout 720s;
-  proxy_connect_timeout 720s;
-  proxy_send_timeout 720s;
+  location / {
+    proxy_pass http://odoo_${INSTANCE_NAME};
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+  }
 
   # Redirect websocket requests to odoo gevent port
   location /websocket {
@@ -288,16 +325,8 @@ server {
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
-  }
-
-  # Redirect requests to odoo backend server
-  location / {
-    proxy_pass http://odoo_${INSTANCE_NAME};
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_redirect off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+    proxy_cookie_flags session_id samesite=lax secure;
   }
 
   # Gzip settings
@@ -325,7 +354,8 @@ EOF
     #--------------------------------------------------
     echo -e "\n---- Setting up SSL certificates with Certbot ----"
     sudo apt install snapd -y
-    sudo snap install core; sudo snap refresh core
+    sudo snap install core
+    sudo snap refresh core
     sudo snap install --classic certbot
     sudo ln -sf /snap/bin/certbot /usr/bin/certbot
 
@@ -352,7 +382,7 @@ else
     if [ -f "$NGINX_CONF_FILE" ]; then
         echo "Existing Nginx configuration for '$INSTANCE_NAME' found. Removing it."
         sudo rm -f "$NGINX_CONF_FILE"
-        sudo rm -f "/etc/nginx/sites-enabled/${INSTANCE_NAME}"
+        sudo rm -f "/etc/nginx/sites-enabled/${INSTANCE_NAME}" || true
     fi
 
     # Create Nginx configuration without SSL
@@ -376,9 +406,14 @@ server {
   access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
   error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
 
-  proxy_read_timeout 720s;
-  proxy_connect_timeout 720s;
-  proxy_send_timeout 720s;
+  location / {
+    proxy_pass http://odoo_${INSTANCE_NAME};
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+  }
 
   # Redirect websocket requests to odoo gevent port
   location /websocket {
@@ -389,16 +424,6 @@ server {
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
-  }
-
-  # Redirect requests to odoo backend server
-  location / {
-    proxy_pass http://odoo_${INSTANCE_NAME};
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_redirect off;
   }
 
   # Gzip settings
@@ -426,27 +451,35 @@ fi
 
 echo "-----------------------------------------------------------"
 echo "Instance '$INSTANCE_NAME' has been added successfully!"
-echo "Port: $OE_PORT"
-echo "Gevent Port: $GEVENT_PORT"
-echo "Service name: ${SERVICE_FILE}"
-echo "Configuration file location: /etc/${OE_CONFIG}.conf"
-echo "Logfile location: /var/log/${OE_USER}/${OE_CONFIG}.log"
-echo "Custom addons folder: ${INSTANCE_DIR}/custom/addons/"
-echo "Database user: $INSTANCE_NAME"
-echo "Database password: $DB_PASSWORD"
-echo "Superadmin password: $OE_SUPERADMIN"
+echo "-----------------------------------------------------------"
+echo "Ports:"
+echo "  XML-RPC Port: $OE_PORT"
+echo "  Gevent (WebSocket) Port: $GEVENT_PORT"
+echo ""
+echo "Service Information:"
+echo "  Service Name: ${SERVICE_FILE}"
+echo "  Configuration File: /etc/${OE_CONFIG}.conf"
+echo "  Logfile: /var/log/${OE_USER}/${OE_CONFIG}.log"
+echo ""
+echo "Custom Addons Folder: ${INSTANCE_DIR}/custom/addons/"
+echo ""
+echo "Database Information:"
+echo "  Database User: $INSTANCE_NAME"
+echo "  Database Password: $DB_PASSWORD"
+echo ""
+echo "Superadmin Information:"
+echo "  Superadmin Password: $OE_SUPERADMIN"
 echo ""
 echo "Manage Odoo service with the following commands:"
 echo "  Start:   sudo systemctl start ${SERVICE_FILE}"
 echo "  Stop:    sudo systemctl stop ${SERVICE_FILE}"
 echo "  Restart: sudo systemctl restart ${SERVICE_FILE}"
 echo ""
-
 if [ "$ENABLE_SSL" = "True" ]; then
-    echo "Nginx configuration file: /etc/nginx/sites-available/${WEBSITE_NAME}"
+    echo "Nginx Configuration File: /etc/nginx/sites-available/${WEBSITE_NAME}"
     echo "Access URL: https://${WEBSITE_NAME}"
 else
-    echo "Nginx configuration file: /etc/nginx/sites-available/${INSTANCE_NAME}"
+    echo "Nginx Configuration File: /etc/nginx/sites-available/${INSTANCE_NAME}"
     echo "Access URL: http://${SERVER_IP}:${OE_PORT}"
 fi
 echo "-----------------------------------------------------------"
