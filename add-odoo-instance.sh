@@ -22,11 +22,29 @@ generate_random_password() {
     openssl rand -base64 16
 }
 
-# Ensure lsof is installed
-if ! command -v lsof &> /dev/null; then
-    echo "lsof could not be found. Installing lsof..."
-    sudo apt update
-    sudo apt install lsof -y
+# Ensure required packages are installed
+install_package() {
+    local PACKAGE=$1
+    if ! dpkg -s "$PACKAGE" &> /dev/null; then
+        echo "$PACKAGE could not be found. Installing $PACKAGE..."
+        sudo apt update
+        sudo apt install "$PACKAGE" -y
+    fi
+}
+
+# Ensure necessary packages are installed
+install_package "lsof"
+install_package "python3-venv"
+install_package "nginx"
+install_package "snapd"
+
+# Install Certbot if not installed
+if ! command -v certbot &> /dev/null; then
+    echo "Installing Certbot..."
+    sudo snap install core
+    sudo snap refresh core
+    sudo snap install --classic certbot
+    sudo ln -sf /snap/bin/certbot /usr/bin/certbot
 fi
 
 # Base variables
@@ -127,8 +145,8 @@ OE_PORT=$(find_available_port $BASE_ODOO_PORT EXISTING_OE_PORTS)
 GEVENT_PORT=$(find_available_port $BASE_GEVENT_PORT EXISTING_GEVENT_PORTS)
 
 echo "Assigned Ports:"
-echo "  xmlrpc_port: $OE_PORT"
-echo "  gevent_port: $GEVENT_PORT"
+echo "  XML-RPC Port: $OE_PORT"
+echo "  Gevent (WebSocket) Port: $GEVENT_PORT"
 
 # Ask whether to enable SSL for this instance
 read -p "Do you want to enable SSL with Certbot for instance '$INSTANCE_NAME'? (yes/no): " SSL_CHOICE
@@ -275,8 +293,6 @@ echo "Odoo service for instance '$INSTANCE_NAME' started successfully."
 #--------------------------------------------------
 if [ "$ENABLE_SSL" = "True" ]; then
     echo -e "\n---- Configuring Nginx for instance '$INSTANCE_NAME' with SSL ----"
-    sudo apt update
-    sudo apt install nginx -y
 
     NGINX_CONF_FILE="/etc/nginx/sites-available/${WEBSITE_NAME}"
     # Remove existing Nginx configuration if it exists
@@ -286,13 +302,13 @@ if [ "$ENABLE_SSL" = "True" ]; then
         sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}" || true
     fi
 
-    # Create Nginx configuration with SSL
+    # Create Nginx configuration with SSL using your template
     sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
 # Odoo server
 upstream odoo_${INSTANCE_NAME} {
   server 127.0.0.1:${OE_PORT};
 }
-upstream odoo_websocket_${INSTANCE_NAME} {
+upstream odoochat_${INSTANCE_NAME} {
   server 127.0.0.1:${GEVENT_PORT};
 }
 map \$http_upgrade \$connection_upgrade {
@@ -300,41 +316,66 @@ map \$http_upgrade \$connection_upgrade {
   ''      close;
 }
 
+# HTTP -> HTTPS redirect
 server {
   listen 80;
   server_name ${WEBSITE_NAME};
+  rewrite ^(.*) https://\$host\$1 permanent;
+}
 
+server {
+  listen 443 ssl;
+  server_name ${WEBSITE_NAME};
+  proxy_read_timeout 720s;
+  proxy_connect_timeout 720s;
+  proxy_send_timeout 720s;
+
+  # SSL parameters
+  ssl_certificate /etc/letsencrypt/live/${WEBSITE_NAME}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${WEBSITE_NAME}/privkey.pem;
+  ssl_session_timeout 30m;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+  ssl_prefer_server_ciphers off;
+
+  # Logs
   access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
   error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
 
-  location / {
-    proxy_pass http://odoo_${INSTANCE_NAME};
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_redirect off;
-  }
-
   # Redirect websocket requests to odoo gevent port
   location /websocket {
-    proxy_pass http://odoo_websocket_${INSTANCE_NAME};
+    proxy_pass http://odoochat_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
-    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-Host \$http_host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
-    proxy_cookie_flags session_id samesite=lax secure;
+    proxy_cookie_flags session_id samesite=lax secure;  # requires nginx 1.19.8
   }
 
-  # Gzip settings
+  # Redirect requests to odoo backend server
+  location / {
+    # Add Headers for odoo proxy mode
+    proxy_set_header X-Forwarded-Host \$http_host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+    proxy_pass http://odoo_${INSTANCE_NAME};
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+    proxy_cookie_flags session_id samesite=lax secure;  # requires nginx 1.19.8
+  }
+
+  # Enable Gzip
   gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
   gzip on;
 }
 EOF
 
+    # Symlink the config to sites-enabled
     sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${WEBSITE_NAME}
 
     echo "Nginx configuration for instance '$INSTANCE_NAME' is created at $NGINX_CONF_FILE"
@@ -346,20 +387,11 @@ EOF
         exit 1
     fi
 
-    # Restart Nginx
+    # Restart Nginx to apply the new configuration
     sudo systemctl restart nginx
 
-    #--------------------------------------------------
-    # Enable SSL with Certbot
-    #--------------------------------------------------
+    # Obtain SSL certificates using Certbot
     echo -e "\n---- Setting up SSL certificates with Certbot ----"
-    sudo apt install snapd -y
-    sudo snap install core
-    sudo snap refresh core
-    sudo snap install --classic certbot
-    sudo ln -sf /snap/bin/certbot /usr/bin/certbot
-
-    # Obtain SSL certificates
     sudo certbot --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL --redirect
 
     if [ $? -ne 0 ]; then
@@ -372,10 +404,8 @@ EOF
 else
     echo "Nginx isn't configured for instance '$INSTANCE_NAME' due to user's choice of not enabling SSL."
 
-    # If SSL is not enabled, still configure Nginx without SSL
+    # If SSL is not enabled, still configure Nginx without SSL using your template
     echo -e "\n---- Configuring Nginx for instance '$INSTANCE_NAME' without SSL ----"
-    sudo apt update
-    sudo apt install nginx -y
 
     NGINX_CONF_FILE="/etc/nginx/sites-available/${INSTANCE_NAME}"
     # Remove existing Nginx configuration if it exists
@@ -385,13 +415,13 @@ else
         sudo rm -f "/etc/nginx/sites-enabled/${INSTANCE_NAME}" || true
     fi
 
-    # Create Nginx configuration without SSL
+    # Create Nginx configuration without SSL using your template
     sudo bash -c "cat > /etc/nginx/sites-available/${INSTANCE_NAME}" <<EOF
 # Odoo server
 upstream odoo_${INSTANCE_NAME} {
   server 127.0.0.1:${OE_PORT};
 }
-upstream odoo_websocket_${INSTANCE_NAME} {
+upstream odoochat_${INSTANCE_NAME} {
   server 127.0.0.1:${GEVENT_PORT};
 }
 map \$http_upgrade \$connection_upgrade {
@@ -408,30 +438,30 @@ server {
 
   location / {
     proxy_pass http://odoo_${INSTANCE_NAME};
-    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-Host \$http_host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_redirect off;
   }
 
-  # Redirect websocket requests to odoo gevent port
   location /websocket {
-    proxy_pass http://odoo_websocket_${INSTANCE_NAME};
+    proxy_pass http://odoochat_${INSTANCE_NAME};
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
-    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-Host \$http_host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
   }
 
-  # Gzip settings
+  # Enable Gzip
   gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
   gzip on;
 }
 EOF
 
+    # Symlink the config to sites-enabled
     sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${INSTANCE_NAME}
 
     echo "Nginx configuration for instance '$INSTANCE_NAME' is created at $NGINX_CONF_FILE"
@@ -443,7 +473,7 @@ EOF
         exit 1
     fi
 
-    # Restart Nginx
+    # Restart Nginx to apply the new configuration
     sudo systemctl restart nginx
 
     echo "Nginx configuration without SSL is up and running for instance '$INSTANCE_NAME'."
