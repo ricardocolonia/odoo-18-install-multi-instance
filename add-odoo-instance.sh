@@ -302,9 +302,87 @@ if [ "$ENABLE_SSL" = "True" ]; then
         sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}" || true
     fi
 
-    # Create Nginx configuration with SSL using your template
+    # --------------------------------------------------
+    # Step 1: Create Initial Nginx Configuration Without SSL
+    # --------------------------------------------------
+    echo -e "\n---- Configuring Nginx for instance '$INSTANCE_NAME' without SSL to obtain certificates ----"
+
     sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
-# Odoo server
+# Odoo server - Initial configuration for SSL certificate generation
+upstream odoo_${INSTANCE_NAME} {
+  server 127.0.0.1:${OE_PORT};
+}
+upstream odoochat_${INSTANCE_NAME} {
+  server 127.0.0.1:${GEVENT_PORT};
+}
+
+server {
+  listen 80;
+  server_name ${WEBSITE_NAME};
+
+  access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
+  error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
+
+  location / {
+    proxy_pass http://odoo_${INSTANCE_NAME};
+    proxy_set_header X-Forwarded-Host \$http_host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+  }
+
+  location /websocket {
+    proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection \$connection_upgrade;
+    proxy_set_header X-Forwarded-Host \$http_host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+  }
+
+  # Enable Gzip
+  gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
+  gzip on;
+}
+EOF
+
+    # Symlink the initial config to sites-enabled
+    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${WEBSITE_NAME}
+
+    echo "Initial Nginx configuration for instance '$INSTANCE_NAME' is created at $NGINX_CONF_FILE without SSL."
+
+    # Test Nginx configuration
+    sudo nginx -t
+    if [ $? -ne 0 ]; then
+        echo "Initial Nginx configuration test failed. Please check the configuration."
+        exit 1
+    fi
+
+    # Restart Nginx to apply the initial configuration
+    sudo systemctl restart nginx
+
+    # --------------------------------------------------
+    # Step 2: Obtain SSL Certificates Using Certbot
+    # --------------------------------------------------
+    echo -e "\n---- Setting up SSL certificates with Certbot ----"
+    sudo certbot certonly --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL --redirect
+
+    if [ $? -ne 0 ]; then
+        echo "Certbot failed to obtain SSL certificates. Please check the domain and email address."
+        exit 1
+    fi
+
+    echo "SSL certificates obtained successfully."
+
+    # --------------------------------------------------
+    # Step 3: Update Nginx Configuration to Include SSL
+    # --------------------------------------------------
+    echo -e "\n---- Updating Nginx configuration to include SSL ----"
+
+    sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
+# Odoo server - Configuration with SSL
 upstream odoo_${INSTANCE_NAME} {
   server 127.0.0.1:${OE_PORT};
 }
@@ -375,36 +453,22 @@ server {
 }
 EOF
 
-    # Symlink the config to sites-enabled
-    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${WEBSITE_NAME}
-
-    echo "Nginx configuration for instance '$INSTANCE_NAME' is created at $NGINX_CONF_FILE"
-
     # Test Nginx configuration
     sudo nginx -t
     if [ $? -ne 0 ]; then
-        echo "Nginx configuration test failed. Please check the configuration."
+        echo "Updated Nginx configuration with SSL test failed. Please check the configuration."
         exit 1
     fi
 
-    # Restart Nginx to apply the new configuration
+    # Restart Nginx to apply the updated configuration
     sudo systemctl restart nginx
 
-    # Obtain SSL certificates using Certbot
-    echo -e "\n---- Setting up SSL certificates with Certbot ----"
-    sudo certbot --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL --redirect
-
-    if [ $? -ne 0 ]; then
-        echo "Certbot failed to obtain SSL certificates. Please check the domain and email address."
-        exit 1
-    fi
-
-    echo "SSL certificates obtained and Nginx configured for HTTPS."
+    echo "Nginx configuration for instance '$INSTANCE_NAME' with SSL is up and running."
 
 else
     echo "Nginx isn't configured for instance '$INSTANCE_NAME' due to user's choice of not enabling SSL."
 
-    # If SSL is not enabled, still configure Nginx without SSL using your template
+    # If SSL is not enabled, configure Nginx without SSL using your template
     echo -e "\n---- Configuring Nginx for instance '$INSTANCE_NAME' without SSL ----"
 
     NGINX_CONF_FILE="/etc/nginx/sites-available/${INSTANCE_NAME}"
