@@ -330,6 +330,10 @@ upstream odoo_${INSTANCE_NAME} {
 upstream odoochat_${INSTANCE_NAME} {
   server 127.0.0.1:${GEVENT_PORT};
 }
+map \$http_upgrade \$connection_upgrade {
+  default upgrade;
+  ''      close;
+}
 
 server {
   listen 80;
