@@ -34,7 +34,6 @@ install_package() {
 
 # Ensure necessary packages are installed
 install_package "lsof"
-install_package "python3-venv"
 install_package "nginx"
 install_package "snapd"
 
@@ -45,6 +44,16 @@ if ! command -v certbot &> /dev/null; then
     sudo snap refresh core
     sudo snap install --classic certbot
     sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+fi
+
+# Check if Python 3.10 is installed, install if not
+if ! command -v python3.10 &> /dev/null; then
+    echo "Python 3.10 is not installed. Installing Python 3.10..."
+    sudo apt update
+    sudo apt install software-properties-common -y
+    sudo add-apt-repository ppa:deadsnakes/ppa -y
+    sudo apt update
+    sudo apt install python3.10 python3.10-venv python3.10-dev -y
 fi
 
 # Base variables
@@ -211,18 +220,18 @@ INSTANCE_DIR="${OE_HOME}/${INSTANCE_NAME}"
 sudo mkdir -p "${INSTANCE_DIR}/custom/addons"
 sudo chown -R $OE_USER:$OE_USER "${INSTANCE_DIR}"
 
-# Create a virtual environment for the instance
+# Create a virtual environment for the instance using Python 3.10
 INSTANCE_VENV="${INSTANCE_DIR}/venv"
-echo "Creating a virtual environment for instance '$INSTANCE_NAME'..."
-sudo -u $OE_USER python3 -m venv "$INSTANCE_VENV"
+echo "Creating a virtual environment for instance '$INSTANCE_NAME' using Python 3.10..."
+sudo -u $OE_USER python3.10 -m venv "$INSTANCE_VENV"
 if [ $? -ne 0 ]; then
     echo "Failed to create virtual environment. Exiting."
     exit 1
 fi
 
-# Activate and install required dependencies
+# Activate and install required dependencies using Python 3.10
 echo "Installing Python dependencies in the virtual environment..."
-sudo -u $OE_USER bash -c "source ${INSTANCE_VENV}/bin/activate && pip install --upgrade pip && pip install -r ${OE_HOME_EXT}/requirements.txt"
+sudo -u $OE_USER bash -c "source ${INSTANCE_VENV}/bin/activate && pip install --upgrade pip && pip install wheel && pip install -r ${OE_HOME_EXT}/requirements.txt"
 if [ $? -ne 0 ]; then
     echo "Failed to install Python dependencies. Exiting."
     exit 1
@@ -417,7 +426,7 @@ map \$http_upgrade \$connection_upgrade {
 server {
   listen 80;
   server_name ${WEBSITE_NAME};
-  rewrite ^(.*) https://\$host\$1 permanent;
+  return 301 https://\$host\$request_uri;
 }
 
 server {
