@@ -172,7 +172,7 @@ sudo bash -c "cat > ${CONFIG_FILE}" <<EOF
 [options]
 admin_passwd = ${SUPERADMIN_PASS}
 db_host = localhost
-db_port = False
+;list_db = False
 db_user = ${INSTANCE_NAME}
 db_password = ${DB_PASSWORD}
 addons_path = ${OE_BASE_CODE}/addons,${CUSTOM_ADDONS_DIR}
