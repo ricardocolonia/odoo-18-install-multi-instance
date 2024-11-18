@@ -1,17 +1,17 @@
 #!/bin/bash
 ################################################################################
-# Script para agregar una instancia de Odoo 18 a una configuración de servidor existente
+# Script para crear una instancia de Odoo 18 en Ubuntu 24.04 LTS
 #-------------------------------------------------------------------------------
-# Este script verifica qué instancias ya están instaladas, identifica puertos disponibles
-# y agrega una nueva instancia de Odoo 18 con la configuración elegida.
+# Este script crea una nueva instancia de Odoo 18 con su propio entorno virtual,
+# directorio de instancia, configuración personalizada y configuración de Nginx.
 #-------------------------------------------------------------------------------
 # Uso:
-# 1. Guárdalo como add-odoo18-instance.sh
-#    sudo nano add-odoo18-instance.sh
+# 1. Guárdalo como create_odoo_instance.sh
+#    sudo nano create_odoo_instance.sh
 # 2. Haz el script ejecutable:
-#    sudo chmod +x add-odoo18-instance.sh
+#    sudo chmod +x create_odoo_instance.sh
 # 3. Ejecuta el script:
-#    sudo ./add-odoo18-instance.sh
+#    sudo ./create_odoo_instance.sh
 ################################################################################
 
 # Salir inmediatamente si un comando falla
@@ -22,50 +22,12 @@ generate_random_password() {
     openssl rand -base64 16
 }
 
-# Asegurarse de que los paquetes necesarios estén instalados
-install_package() {
-    local PACKAGE=$1
-    if ! dpkg -s "$PACKAGE" &> /dev/null; then
-        echo "$PACKAGE no está instalado. Instalando $PACKAGE..."
-        sudo apt update
-        sudo apt install "$PACKAGE" -y
-    fi
-}
-
-# Asegurar que los paquetes necesarios estén instalados
-install_package "lsof"
-install_package "nginx"
-install_package "snapd"
-install_package "openssl"  # Asegurarse de que openssl esté instalado
-install_package "git"      # Asegurarse de que git esté instalado
-
-# Instalar Certbot si no está instalado
-if ! command -v certbot &> /dev/null; then
-    echo "Instalando Certbot..."
-    sudo snap install core
-    sudo snap refresh core
-    sudo snap install --classic certbot
-    sudo ln -sf /snap/bin/certbot /usr/bin/certbot
-fi
-
 # Variables base
 OE_USER="odoo18"
-INSTALL_WKHTMLTOPDF="True"
-GENERATE_RANDOM_PASSWORD="True"
+OE_HOME="/odoo"
+OE_BASE_CODE="${OE_HOME}/odoo"  # Directorio donde está el código base de Odoo
 BASE_ODOO_PORT=8069
-BASE_GEVENT_PORT=9069  # Puerto base para gevent (websocket)
-
-# Obtener la dirección IP del servidor
-SERVER_IP=$(hostname -I | awk '{print $1}')
-
-# Arrays para almacenar instancias y puertos existentes
-declare -a EXISTING_INSTANCE_NAMES
-declare -a EXISTING_OE_PORTS
-declare -a EXISTING_GEVENT_PORTS
-
-# Versión de Odoo
-OE_VERSION="18.0"
-OE_VERSION_SHORT="18"
+BASE_GEVENT_PORT=8072  # Puerto base para gevent (longpolling)
 PYTHON_VERSION="3.11"
 
 # Asegurarse de que la versión requerida de Python esté instalada
@@ -78,44 +40,17 @@ if ! command -v python${PYTHON_VERSION} &> /dev/null; then
     sudo apt install python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev -y
 fi
 
-# Ajustar rutas basadas en tu instalación
-OE_BASE_DIR="/odoo"
-OE_HOME="$OE_BASE_DIR"
-OE_HOME_EXT="$OE_HOME"
-
-# Directorios de addons Enterprise (opcional)
-ENTERPRISE_DIR="${OE_HOME}/enterprise"
-ENTERPRISE_ADDONS="${ENTERPRISE_DIR}/addons"
-
-# Recolectar instancias existentes
-INSTANCE_CONFIG_FILES=(/etc/${OE_USER}-server-*.conf)
-if [ -f "${INSTANCE_CONFIG_FILES[0]}" ]; then
-    for CONFIG_FILE in "${INSTANCE_CONFIG_FILES[@]}"; do
-        INSTANCE_NAME=$(basename "$CONFIG_FILE" | sed "s/${OE_USER}-server-//" | sed 's/\.conf//')
-        CONFIG_VERSION=$(grep "^addons_path" "$CONFIG_FILE" | grep -o "odoo[0-9]*" | grep -o "[0-9]*")
-        if [ "$CONFIG_VERSION" == "$OE_VERSION_SHORT" ]; then
-            EXISTING_INSTANCE_NAMES+=("$INSTANCE_NAME")
-            OE_PORT=$(grep "^xmlrpc_port" "$CONFIG_FILE" | awk -F '= ' '{print $2}')
-            GEVENT_PORT=$(grep "^gevent_port" "$CONFIG_FILE" | awk -F '= ' '{print $2}')
-            EXISTING_OE_PORTS+=("$OE_PORT")
-            EXISTING_GEVENT_PORTS+=("$GEVENT_PORT")
-        fi
-    done
-else
-    echo "No se encontraron instancias existentes de Odoo."
-fi
+# Obtener la dirección IP del servidor
+SERVER_IP=$(hostname -I | awk '{print $1}')
 
 # Función para encontrar un puerto disponible
 find_available_port() {
     local BASE_PORT=$1
-    local -n EXISTING_PORTS=$2
-    local PORT=$BASE_PORT
     while true; do
-        # Verificar si el puerto está en uso o en la lista de puertos existentes
-        if [[ " ${EXISTING_PORTS[@]} " =~ " $PORT " ]] || lsof -i TCP:$PORT >/dev/null 2>&1; then
-            PORT=$((PORT + 1))
+        if lsof -i TCP:$BASE_PORT >/dev/null 2>&1; then
+            BASE_PORT=$((BASE_PORT + 1))
         else
-            echo "$PORT"
+            echo "$BASE_PORT"
             break
         fi
     done
@@ -130,69 +65,29 @@ if [[ ! "$INSTANCE_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     exit 1
 fi
 
-# Función para crear usuario de PostgreSQL con contraseña aleatoria
-create_postgres_user() {
-    local DB_USER=$1
-    local DB_PASSWORD=$2
+# Solicitar el dominio para la instancia
+read -p "Ingresa el dominio para la instancia (por ejemplo, odoo.miempresa.com): " INSTANCE_DOMAIN
 
-    # Guardar el directorio actual
-    ORIGINAL_DIR=$(pwd)
-    # Cambiar a un directorio accesible por el usuario postgres
-    cd /tmp
-
-    # Verificar si el usuario de PostgreSQL ya existe
-    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
-        echo "El usuario de PostgreSQL '$DB_USER' ya existe. Saltando creación."
-    else
-        # Crear el usuario de la base de datos
-        sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
-        echo "Usuario de PostgreSQL '$DB_USER' creado exitosamente."
-    fi
-
-    # Volver al directorio original
-    cd "$ORIGINAL_DIR"
-}
-
-# Solicitar si tiene licencia Enterprise
-read -p "¿Tienes una licencia Enterprise para la base de datos de esta instancia? Tendrás que ingresar tu código de licencia después de la instalación (sí/no): " ENTERPRISE_CHOICE
-if [[ "$ENTERPRISE_CHOICE" =~ ^(sí|si|s)$ ]]; then
-    HAS_ENTERPRISE_LICENSE="True"
-else
-    HAS_ENTERPRISE_LICENSE="False"
-fi
-echo "HAS_ENTERPRISE_LICENSE está configurado como '$HAS_ENTERPRISE_LICENSE'"
-
-# Verificar si la instancia ya existe
-if [[ " ${EXISTING_INSTANCE_NAMES[@]} " =~ " ${INSTANCE_NAME} " ]]; then
-    echo "Ya existe una instancia con el nombre '$INSTANCE_NAME'. Por favor, elige un nombre diferente."
+# Validar nombre de dominio
+if [[ ! "$INSTANCE_DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    echo "Nombre de dominio inválido."
     exit 1
 fi
 
-# Configurar OE_CONFIG para la instancia
-OE_CONFIG="${OE_USER}-server-${INSTANCE_NAME}"
-
-# Encontrar puertos disponibles
-OE_PORT=$(find_available_port $BASE_ODOO_PORT EXISTING_OE_PORTS)
-GEVENT_PORT=$(find_available_port $BASE_GEVENT_PORT EXISTING_GEVENT_PORTS)
-
-echo "Puertos asignados:"
-echo "  Puerto XML-RPC: $OE_PORT"
-echo "  Puerto Gevent (WebSocket): $GEVENT_PORT"
+# Solicitar si tiene licencia Enterprise
+read -p "¿Tienes una licencia Enterprise para esta instancia? (sí/no): " ENTERPRISE_CHOICE
+if [[ "$ENTERPRISE_CHOICE" =~ ^(sí|si|s)$ ]]; then
+    HAS_ENTERPRISE="True"
+else
+    HAS_ENTERPRISE="False"
+fi
 
 # Preguntar si desea habilitar SSL para esta instancia
 read -p "¿Deseas habilitar SSL con Certbot para la instancia '$INSTANCE_NAME'? (sí/no): " SSL_CHOICE
 if [[ "$SSL_CHOICE" =~ ^(sí|si|s)$ ]]; then
     ENABLE_SSL="True"
-    # Solicitar nombre de dominio y correo electrónico de administrador
-    read -p "Ingresa el nombre de dominio para la instancia (por ejemplo, odoo.miempresa.com): " WEBSITE_NAME
-    read -p "Ingresa tu dirección de correo electrónico para el registro del certificado SSL: " ADMIN_EMAIL
-
-    # Validar nombre de dominio
-    if [[ ! "$WEBSITE_NAME" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-        echo "Nombre de dominio inválido."
-        exit 1
-    fi
-
+    # Solicitar correo electrónico para Certbot
+    read -p "Ingresa tu dirección de correo electrónico para Certbot: " ADMIN_EMAIL
     # Validar correo electrónico
     if ! [[ "$ADMIN_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
         echo "Dirección de correo electrónico inválida."
@@ -200,105 +95,101 @@ if [[ "$SSL_CHOICE" =~ ^(sí|si|s)$ ]]; then
     fi
 else
     ENABLE_SSL="False"
-    # Sin SSL, usamos la IP del servidor
-    WEBSITE_NAME=$SERVER_IP
 fi
 
-# Generar OE_SUPERADMIN
-if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
-    OE_SUPERADMIN=$(generate_random_password)
-    echo "Contraseña aleatoria de superadministrador generada."
-else
-    read -s -p "Ingresa la contraseña de superadministrador para la base de datos: " OE_SUPERADMIN
-    echo
-fi
+# Generar contraseña de superadministrador
+SUPERADMIN_PASS=$(generate_random_password)
+echo "Contraseña de superadministrador generada."
 
-# Generar contraseña aleatoria para el usuario de PostgreSQL
+# Generar contraseña para PostgreSQL
 DB_PASSWORD=$(generate_random_password)
-echo "Contraseña aleatoria para PostgreSQL generada."
+echo "Contraseña de base de datos generada."
 
-# Crear usuario de PostgreSQL
-create_postgres_user "$INSTANCE_NAME" "$DB_PASSWORD"
+# Crear usuario de PostgreSQL para la instancia
+sudo -u postgres psql -c "CREATE USER $INSTANCE_NAME WITH CREATEDB PASSWORD '$DB_PASSWORD';"
+echo "Usuario de PostgreSQL '$INSTANCE_NAME' creado."
 
-echo -e "\n==== Configurando instancia de ODOO '$INSTANCE_NAME' ===="
+# Crear directorio de instancia
+INSTANCE_DIR="${OE_HOME}/${INSTANCE_NAME}"
+sudo mkdir -p "${INSTANCE_DIR}"
+sudo chown -R $OE_USER:$OE_USER "${INSTANCE_DIR}"
+
+# Crear directorio de addons personalizados
+CUSTOM_ADDONS_DIR="${INSTANCE_DIR}/custom/addons"
+sudo mkdir -p "${CUSTOM_ADDONS_DIR}"
+sudo chown -R $OE_USER:$OE_USER "${CUSTOM_ADDONS_DIR}"
+
+# Si tiene licencia Enterprise, crear directorio de addons Enterprise
+if [ "$HAS_ENTERPRISE" = "True" ]; then
+    ENTERPRISE_ADDONS_DIR="${INSTANCE_DIR}/enterprise/addons"
+    sudo mkdir -p "${ENTERPRISE_ADDONS_DIR}"
+    sudo chown -R $OE_USER:$OE_USER "${INSTANCE_DIR}/enterprise"
+    echo "Directorio de addons Enterprise creado en '${ENTERPRISE_ADDONS_DIR}'."
+    echo "Por favor, clona el código Enterprise en '${ENTERPRISE_ADDONS_DIR}'."
+fi
+
+# Crear entorno virtual para la instancia
+VENV_DIR="${INSTANCE_DIR}/venv"
+sudo -u $OE_USER python${PYTHON_VERSION} -m venv "${VENV_DIR}"
+echo "Entorno virtual creado en '${VENV_DIR}'."
+
+# Instalar dependencias en el entorno virtual
+sudo -u $OE_USER "${VENV_DIR}/bin/pip" install wheel
+sudo -u $OE_USER "${VENV_DIR}/bin/pip" install -r "${OE_BASE_CODE}/requirements.txt"
+echo "Dependencias instaladas en el entorno virtual."
+
+# Encontrar puertos disponibles
+ODOO_PORT=$(find_available_port $BASE_ODOO_PORT)
+GEVENT_PORT=$(find_available_port $BASE_GEVENT_PORT)
+
+# Crear archivo de configuración de Odoo
+CONFIG_FILE="/etc/${OE_USER}-${INSTANCE_NAME}.conf"
+sudo bash -c "cat > ${CONFIG_FILE}" <<EOF
+[options]
+admin_passwd = ${SUPERADMIN_PASS}
+db_host = False
+db_port = False
+db_user = ${INSTANCE_NAME}
+db_password = ${DB_PASSWORD}
+addons_path = ${OE_BASE_CODE}/addons,${CUSTOM_ADDONS_DIR}
+http_port = ${ODOO_PORT}
+gevent_port = ${GEVENT_PORT}
+logfile = /var/log/${OE_USER}/${INSTANCE_NAME}.log
+EOF
+
+# Si tiene licencia Enterprise, agregar ruta de addons Enterprise
+if [ "$HAS_ENTERPRISE" = "True" ]; then
+    sudo sed -i "s|addons_path = .*|&,$ENTERPRISE_ADDONS_DIR|" ${CONFIG_FILE}
+fi
+
+# Si SSL está habilitado, configurar proxy_mode y dbfilter
+if [ "$ENABLE_SSL" = "True" ]; then
+    echo "proxy_mode = True" | sudo tee -a ${CONFIG_FILE}
+    echo "dbfilter = ^%h\$" | sudo tee -a ${CONFIG_FILE}
+fi
+
+sudo chown $OE_USER:$OE_USER ${CONFIG_FILE}
+sudo chmod 640 ${CONFIG_FILE}
+
+echo "Archivo de configuración creado en '${CONFIG_FILE}'."
+
 # Crear directorio de logs
 sudo mkdir -p /var/log/${OE_USER}
 sudo chown ${OE_USER}:${OE_USER} /var/log/${OE_USER}
 
-# Crear directorio de addons personalizados para la instancia
-INSTANCE_DIR="${OE_HOME}/${INSTANCE_NAME}"
-sudo mkdir -p "${INSTANCE_DIR}/custom/addons"
-sudo chown -R $OE_USER:$OE_USER "${INSTANCE_DIR}"
-
-# Si tiene licencia Enterprise, configurar el directorio de addons Enterprise
-if [ "$HAS_ENTERPRISE_LICENSE" = "True" ]; then
-    echo "Configurando directorio de addons Enterprise..."
-    # Crear el directorio Enterprise si no existe
-    if [ ! -d "$ENTERPRISE_ADDONS" ]; then
-        sudo mkdir -p "$ENTERPRISE_ADDONS"
-        sudo chown -R $OE_USER:$OE_USER "$ENTERPRISE_DIR"
-        echo "Directorio de addons Enterprise creado en $ENTERPRISE_ADDONS"
-    else
-        echo "El directorio de addons Enterprise ya existe en $ENTERPRISE_ADDONS"
-    fi
-    echo "Por favor, asegúrate de clonar el código Enterprise en $ENTERPRISE_ADDONS"
-fi
-
-# Usar el entorno virtual existente
-INSTANCE_VENV="${OE_HOME}/venv"
-
-# Determinar addons_path basado en la elección de licencia Enterprise
-if [ "$HAS_ENTERPRISE_LICENSE" = "True" ]; then
-    ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}"
-else
-    ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons"
-fi
-
-echo -e "\n---- Creando archivo de configuración del servidor para la instancia '$INSTANCE_NAME' ----"
-sudo bash -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
-[options]
-admin_passwd = ${OE_SUPERADMIN}
-db_host = localhost
-db_user = ${INSTANCE_NAME}
-db_password = ${DB_PASSWORD}
-;list_db = False
-xmlrpc_port = ${OE_PORT}
-gevent_port = ${GEVENT_PORT}
-logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
-addons_path=${ADDONS_PATH}
-limit_memory_hard = 2677721600
-limit_memory_soft = 1829145600
-limit_request = 8192
-limit_time_cpu = 600
-limit_time_real = 1200
-max_cron_threads = 1
-workers = 2
-EOF
-
-if [ "$ENABLE_SSL" = "True" ]; then
-    sudo bash -c "echo 'dbfilter = ^%h\$' >> /etc/${OE_CONFIG}.conf"
-    sudo bash -c "echo 'proxy_mode = True' >> /etc/${OE_CONFIG}.conf"
-fi
-
-sudo chown $OE_USER:$OE_USER /etc/${OE_CONFIG}.conf
-sudo chmod 640 /etc/${OE_CONFIG}.conf
-
-# Crear archivo de servicio systemd para la instancia
-echo -e "\n---- Creando archivo de servicio systemd para la instancia '$INSTANCE_NAME' ----"
-SERVICE_FILE="${OE_CONFIG}.service"
-sudo bash -c "cat > /etc/systemd/system/${SERVICE_FILE}" <<EOF
+# Crear archivo de servicio systemd
+SERVICE_FILE="/etc/systemd/system/${OE_USER}-${INSTANCE_NAME}.service"
+sudo bash -c "cat > ${SERVICE_FILE}" <<EOF
 [Unit]
-Description=Odoo Open Source ERP and CRM - Instancia ${INSTANCE_NAME}
+Description=Odoo18 - ${INSTANCE_NAME}
 After=network.target
 
 [Service]
 Type=simple
-SyslogIdentifier=${OE_CONFIG}
-PermissionsStartOnly=true
 User=${OE_USER}
 Group=${OE_USER}
-ExecStart=${INSTANCE_VENV}/bin/python ${OE_HOME_EXT}/odoo-bin -c /etc/${OE_CONFIG}.conf
-WorkingDirectory=${OE_HOME_EXT}
+ExecStart=${VENV_DIR}/bin/python ${OE_BASE_CODE}/odoo-bin -c ${CONFIG_FILE}
+WorkingDirectory=${OE_BASE_CODE}
 StandardOutput=journal+console
 Restart=on-failure
 
@@ -306,45 +197,21 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
-# Recargar el demonio systemd y iniciar el servicio
-echo -e "\n---- Iniciando el servicio ODOO para la instancia '$INSTANCE_NAME' ----"
 sudo systemctl daemon-reload
-sudo systemctl enable ${SERVICE_FILE}
-sudo systemctl start ${SERVICE_FILE}
+sudo systemctl enable ${OE_USER}-${INSTANCE_NAME}.service
+sudo systemctl start ${OE_USER}-${INSTANCE_NAME}.service
 
-# Verificar si el servicio se inició correctamente
-sudo systemctl is-active --quiet ${SERVICE_FILE}
-if [ $? -ne 0 ]; then
-    echo "El servicio ${SERVICE_FILE} no pudo iniciarse. Por favor, revisa los logs."
-    sudo journalctl -u ${SERVICE_FILE} --no-pager
-    exit 1
-fi
+echo "Servicio '${OE_USER}-${INSTANCE_NAME}.service' creado y iniciado."
 
-echo "El servicio Odoo para la instancia '$INSTANCE_NAME' se inició correctamente."
+# Configurar Nginx
+NGINX_AVAILABLE="/etc/nginx/sites-available/${INSTANCE_DOMAIN}"
+NGINX_ENABLED="/etc/nginx/sites-enabled/${INSTANCE_DOMAIN}"
 
-#--------------------------------------------------
-# Configurar Nginx para esta instancia
-#--------------------------------------------------
-if [ "$ENABLE_SSL" = "True" ]; then
-    echo -e "\n---- Configurando Nginx para la instancia '$INSTANCE_NAME' con SSL ----"
-
-    NGINX_CONF_FILE="/etc/nginx/sites-available/${WEBSITE_NAME}"
-    # Eliminar configuración de Nginx existente si existe
-    if [ -f "$NGINX_CONF_FILE" ]; then
-        echo "Se encontró una configuración de Nginx existente para '$WEBSITE_NAME'. Eliminándola."
-        sudo rm -f "$NGINX_CONF_FILE"
-        sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}" || true
-    fi
-
-    # --------------------------------------------------
-    # Paso 1: Crear Configuración Inicial de Nginx Sin SSL
-    # --------------------------------------------------
-    echo -e "\n---- Configurando Nginx para la instancia '$INSTANCE_NAME' sin SSL para obtener certificados ----"
-
-    sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
-# Odoo server - Configuración inicial para generación de certificado SSL
+# Crear configuración mínima de Nginx
+sudo bash -c "cat > ${NGINX_AVAILABLE}" <<EOF
+# Odoo server
 upstream odoo_${INSTANCE_NAME} {
-    server 127.0.0.1:${OE_PORT};
+    server 127.0.0.1:${ODOO_PORT};
 }
 upstream odoochat_${INSTANCE_NAME} {
     server 127.0.0.1:${GEVENT_PORT};
@@ -356,7 +223,7 @@ map \$http_upgrade \$connection_upgrade {
 
 server {
     listen 80;
-    server_name ${WEBSITE_NAME};
+    server_name ${INSTANCE_DOMAIN};
 
     access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
     error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
@@ -389,43 +256,22 @@ server {
 }
 EOF
 
-    # Enlazar la configuración inicial a sites-enabled
-    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${WEBSITE_NAME}
+sudo ln -s ${NGINX_AVAILABLE} ${NGINX_ENABLED}
+sudo nginx -t
+sudo systemctl restart nginx
 
-    echo "Configuración inicial de Nginx para la instancia '$INSTANCE_NAME' creada en $NGINX_CONF_FILE sin SSL."
+echo "Configuración mínima de Nginx creada."
 
-    # Probar la configuración de Nginx
-    sudo nginx -t
-    if [ $? -ne 0 ]; then
-        echo "La prueba de configuración inicial de Nginx falló. Por favor, verifica la configuración."
-        exit 1
-    fi
+# Si SSL está habilitado, obtener certificado y actualizar configuración
+if [ "$ENABLE_SSL" = "True" ]; then
+    echo "Obteniendo certificado SSL con Certbot..."
+    sudo certbot certonly --nginx -d ${INSTANCE_DOMAIN} --non-interactive --agree-tos --email ${ADMIN_EMAIL}
 
-    # Reiniciar Nginx para aplicar la configuración inicial
-    sudo systemctl restart nginx
-
-    # --------------------------------------------------
-    # Paso 2: Obtener Certificados SSL Usando Certbot
-    # --------------------------------------------------
-    echo -e "\n---- Configurando certificados SSL con Certbot ----"
-    sudo certbot certonly --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL
-
-    if [ $? -ne 0 ]; then
-        echo "Certbot no pudo obtener los certificados SSL. Por favor, verifica el dominio y la dirección de correo electrónico."
-        exit 1
-    fi
-
-    echo "Certificados SSL obtenidos exitosamente."
-
-    # --------------------------------------------------
-    # Paso 3: Actualizar Configuración de Nginx para Incluir SSL
-    # --------------------------------------------------
-    echo -e "\n---- Actualizando configuración de Nginx para incluir SSL ----"
-
-    sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
-# Odoo server - Configuración con SSL
+    # Actualizar configuración de Nginx con SSL
+    sudo bash -c "cat > ${NGINX_AVAILABLE}" <<EOF
+# Odoo server
 upstream odoo_${INSTANCE_NAME} {
-    server 127.0.0.1:${OE_PORT};
+    server 127.0.0.1:${ODOO_PORT};
 }
 upstream odoochat_${INSTANCE_NAME} {
     server 127.0.0.1:${GEVENT_PORT};
@@ -435,168 +281,86 @@ map \$http_upgrade \$connection_upgrade {
     ''      close;
 }
 
+# http -> https
 server {
     listen 80;
-    server_name ${WEBSITE_NAME};
-    return 301 https://\$host\$request_uri;
+    server_name ${INSTANCE_DOMAIN};
+    rewrite ^(.*) https://\$host\$1 permanent;
 }
 
 server {
     listen 443 ssl;
-    server_name ${WEBSITE_NAME};
+    server_name ${INSTANCE_DOMAIN};
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
 
-    ssl_certificate /etc/letsencrypt/live/${WEBSITE_NAME}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${WEBSITE_NAME}/privkey.pem;
-    ssl_session_timeout 1d;
+    # SSL parameters
+    ssl_certificate /etc/letsencrypt/live/${INSTANCE_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${INSTANCE_DOMAIN}/privkey.pem;
+    ssl_session_timeout 30m;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    ssl_session_cache shared:SSL:10m;
+    ssl_prefer_server_ciphers off;
 
-    # HSTS
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
-
-    # OCSP Stapling
-    ssl_stapling on;
-    ssl_stapling_verify on;
-
+    # log
     access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
     error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
 
-    proxy_read_timeout 720s;
-    proxy_connect_timeout 720s;
-    proxy_send_timeout 720s;
-
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_redirect off;
-
-    location / {
-        proxy_pass http://odoo_${INSTANCE_NAME};
-    }
-
-    location /longpolling {
+    # Redirect websocket requests to odoo gevent port
+    location /websocket {
         proxy_pass http://odoochat_${INSTANCE_NAME};
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header X-Forwarded-Host \$http_host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Real-IP \$remote_addr;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+        proxy_cookie_flags session_id samesite=lax secure;
     }
 
-    location ~* /web/static/ {
-        proxy_cache_valid 200 90m;
-        proxy_buffering on;
-        expires 864000;
+    # Redirect requests to odoo backend server
+    location / {
+        # Add Headers for odoo proxy mode
+        proxy_set_header X-Forwarded-Host \$http_host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_redirect off;
         proxy_pass http://odoo_${INSTANCE_NAME};
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+        proxy_cookie_flags session_id samesite=lax secure;
     }
+
+    # common gzip
+    gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
+    gzip on;
 }
 EOF
 
-    # Probar la configuración de Nginx
     sudo nginx -t
-    if [ $? -ne 0 ]; then
-        echo "La prueba de configuración de Nginx con SSL falló. Por favor, verifica la configuración."
-        exit 1
-    fi
-
-    # Reiniciar Nginx para aplicar la configuración actualizada
     sudo systemctl restart nginx
-
-    echo "Configuración de Nginx para la instancia '$INSTANCE_NAME' con SSL está activa y funcionando."
-
-else
-    echo "Nginx no está configurado para la instancia '$INSTANCE_NAME' debido a la elección del usuario de no habilitar SSL."
-
-    # Configurar Nginx sin SSL
-    echo -e "\n---- Configurando Nginx para la instancia '$INSTANCE_NAME' sin SSL ----"
-
-    NGINX_CONF_FILE="/etc/nginx/sites-available/${INSTANCE_NAME}"
-    # Eliminar configuración de Nginx existente si existe
-    if [ -f "$NGINX_CONF_FILE" ]; then
-        echo "Se encontró una configuración de Nginx existente para '$INSTANCE_NAME'. Eliminándola."
-        sudo rm -f "$NGINX_CONF_FILE"
-        sudo rm -f "/etc/nginx/sites-enabled/${INSTANCE_NAME}" || true
-    fi
-
-    # Crear configuración de Nginx sin SSL
-    sudo bash -c "cat > /etc/nginx/sites-available/${INSTANCE_NAME}" <<EOF
-# Odoo server
-upstream odoo_${INSTANCE_NAME} {
-    server 127.0.0.1:${OE_PORT};
-}
-upstream odoochat_${INSTANCE_NAME} {
-    server 127.0.0.1:${GEVENT_PORT};
-}
-map \$http_upgrade \$connection_upgrade {
-    default upgrade;
-    ''      close;
-}
-
-server {
-    listen 80;
-    server_name ${SERVER_IP};
-
-    access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
-    error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
-
-    proxy_read_timeout 720s;
-    proxy_connect_timeout 720s;
-    proxy_send_timeout 720s;
-
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_redirect off;
-
-    location / {
-        proxy_pass http://odoo_${INSTANCE_NAME};
-    }
-
-    location /longpolling {
-        proxy_pass http://odoochat_${INSTANCE_NAME};
-    }
-
-    location ~* /web/static/ {
-        proxy_cache_valid 200 90m;
-        proxy_buffering on;
-        expires 864000;
-        proxy_pass http://odoo_${INSTANCE_NAME};
-    }
-}
-EOF
-
-    # Enlazar la configuración a sites-enabled
-    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${INSTANCE_NAME}
-
-    echo "Configuración de Nginx para la instancia '$INSTANCE_NAME' creada en $NGINX_CONF_FILE"
-
-    # Probar la configuración de Nginx
-    sudo nginx -t
-    if [ $? -ne 0 ]; then
-        echo "La prueba de configuración de Nginx falló. Por favor, verifica la configuración."
-        exit 1
-    fi
-
-    # Reiniciar Nginx para aplicar la nueva configuración
-    sudo systemctl restart nginx
-
-    echo "Configuración de Nginx sin SSL está activa y funcionando para la instancia '$INSTANCE_NAME'."
+    echo "Configuración de Nginx actualizada con SSL."
 fi
 
 echo "-----------------------------------------------------------"
-echo "¡La instancia '$INSTANCE_NAME' se ha agregado exitosamente!"
+echo "¡La instancia '$INSTANCE_NAME' se ha creado exitosamente!"
 echo "-----------------------------------------------------------"
 echo "Puertos:"
-echo "  Puerto XML-RPC: $OE_PORT"
-echo "  Puerto Gevent (WebSocket): $GEVENT_PORT"
+echo "  Puerto Odoo (http_port): $ODOO_PORT"
+echo "  Puerto Gevent (gevent_port): $GEVENT_PORT"
 echo ""
 echo "Información del servicio:"
-echo "  Nombre del servicio: ${SERVICE_FILE}"
-echo "  Archivo de configuración: /etc/${OE_CONFIG}.conf"
-echo "  Archivo de log: /var/log/${OE_USER}/${OE_CONFIG}.log"
+echo "  Nombre del servicio: ${OE_USER}-${INSTANCE_NAME}.service"
+echo "  Archivo de configuración: ${CONFIG_FILE}"
+echo "  Archivo de log: /var/log/${OE_USER}/${INSTANCE_NAME}.log"
 echo ""
-echo "Carpeta de addons personalizados: ${INSTANCE_DIR}/custom/addons/"
-if [ "$HAS_ENTERPRISE_LICENSE" = "True" ]; then
-    echo "Carpeta de addons Enterprise: ${ENTERPRISE_ADDONS}"
+echo "Carpeta de addons personalizados: ${CUSTOM_ADDONS_DIR}"
+if [ "$HAS_ENTERPRISE" = "True" ]; then
+    echo "Carpeta de addons Enterprise: ${ENTERPRISE_ADDONS_DIR}"
 fi
 echo ""
 echo "Información de la base de datos:"
@@ -604,18 +368,18 @@ echo "  Usuario de la base de datos: $INSTANCE_NAME"
 echo "  Contraseña de la base de datos: $DB_PASSWORD"
 echo ""
 echo "Información de superadministrador:"
-echo "  Contraseña de superadministrador: $OE_SUPERADMIN"
+echo "  Contraseña de superadministrador: $SUPERADMIN_PASS"
 echo ""
 echo "Administra el servicio de Odoo con los siguientes comandos:"
-echo "  Iniciar:   sudo systemctl start ${SERVICE_FILE}"
-echo "  Detener:   sudo systemctl stop ${SERVICE_FILE}"
-echo "  Reiniciar: sudo systemctl restart ${SERVICE_FILE}"
+echo "  Iniciar:   sudo systemctl start ${OE_USER}-${INSTANCE_NAME}.service"
+echo "  Detener:   sudo systemctl stop ${OE_USER}-${INSTANCE_NAME}.service"
+echo "  Reiniciar: sudo systemctl restart ${OE_USER}-${INSTANCE_NAME}.service"
 echo ""
 if [ "$ENABLE_SSL" = "True" ]; then
-    echo "Archivo de configuración de Nginx: /etc/nginx/sites-available/${WEBSITE_NAME}"
-    echo "URL de acceso: https://${WEBSITE_NAME}"
+    echo "Archivo de configuración de Nginx: ${NGINX_AVAILABLE}"
+    echo "URL de acceso: https://${INSTANCE_DOMAIN}"
 else
-    echo "Archivo de configuración de Nginx: /etc/nginx/sites-available/${INSTANCE_NAME}"
-    echo "URL de acceso: http://${SERVER_IP}:${OE_PORT}"
+    echo "Archivo de configuración de Nginx: ${NGINX_AVAILABLE}"
+    echo "URL de acceso: http://${INSTANCE_DOMAIN}"
 fi
 echo "-----------------------------------------------------------"
