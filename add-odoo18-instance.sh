@@ -221,6 +221,9 @@ echo "Contraseña aleatoria para PostgreSQL generada."
 create_postgres_user "$INSTANCE_NAME" "$DB_PASSWORD"
 
 echo -e "\n==== Configurando instancia de ODOO '$INSTANCE_NAME' ===="
+# Crear directorio de logs
+sudo mkdir -p /var/log/${OE_USER}
+sudo chown ${OE_USER}:${OE_USER} /var/log/${OE_USER}
 
 # Crear directorio de addons personalizados para la instancia
 INSTANCE_DIR="${OE_HOME}/${INSTANCE_NAME}"
@@ -322,9 +325,262 @@ echo "El servicio Odoo para la instancia '$INSTANCE_NAME' se inició correctamen
 #--------------------------------------------------
 # Configurar Nginx para esta instancia
 #--------------------------------------------------
-# (La configuración de Nginx permanece igual que en tu script original, así que puedes mantener esa sección sin cambios)
+if [ "$ENABLE_SSL" = "True" ]; then
+    echo -e "\n---- Configurando Nginx para la instancia '$INSTANCE_NAME' con SSL ----"
 
-# [Continúa con la configuración de Nginx y Certbot según sea necesario]
+    NGINX_CONF_FILE="/etc/nginx/sites-available/${WEBSITE_NAME}"
+    # Eliminar configuración de Nginx existente si existe
+    if [ -f "$NGINX_CONF_FILE" ]; then
+        echo "Se encontró una configuración de Nginx existente para '$WEBSITE_NAME'. Eliminándola."
+        sudo rm -f "$NGINX_CONF_FILE"
+        sudo rm -f "/etc/nginx/sites-enabled/${WEBSITE_NAME}" || true
+    fi
+
+    # --------------------------------------------------
+    # Paso 1: Crear Configuración Inicial de Nginx Sin SSL
+    # --------------------------------------------------
+    echo -e "\n---- Configurando Nginx para la instancia '$INSTANCE_NAME' sin SSL para obtener certificados ----"
+
+    sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
+# Odoo server - Configuración inicial para generación de certificado SSL
+upstream odoo_${INSTANCE_NAME} {
+    server 127.0.0.1:${OE_PORT};
+}
+upstream odoochat_${INSTANCE_NAME} {
+    server 127.0.0.1:${GEVENT_PORT};
+}
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name ${WEBSITE_NAME};
+
+    access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
+    error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
+
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
+
+    # Añadir cabeceras para el modo proxy de Odoo
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+
+    location / {
+        proxy_pass http://odoo_${INSTANCE_NAME};
+    }
+
+    location /longpolling {
+        proxy_pass http://odoochat_${INSTANCE_NAME};
+    }
+
+    location ~* /web/static/ {
+        proxy_cache_valid 200 90m;
+        proxy_buffering on;
+        expires 864000;
+        proxy_pass http://odoo_${INSTANCE_NAME};
+    }
+}
+EOF
+
+    # Enlazar la configuración inicial a sites-enabled
+    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${WEBSITE_NAME}
+
+    echo "Configuración inicial de Nginx para la instancia '$INSTANCE_NAME' creada en $NGINX_CONF_FILE sin SSL."
+
+    # Probar la configuración de Nginx
+    sudo nginx -t
+    if [ $? -ne 0 ]; then
+        echo "La prueba de configuración inicial de Nginx falló. Por favor, verifica la configuración."
+        exit 1
+    fi
+
+    # Reiniciar Nginx para aplicar la configuración inicial
+    sudo systemctl restart nginx
+
+    # --------------------------------------------------
+    # Paso 2: Obtener Certificados SSL Usando Certbot
+    # --------------------------------------------------
+    echo -e "\n---- Configurando certificados SSL con Certbot ----"
+    sudo certbot certonly --nginx -d $WEBSITE_NAME --non-interactive --agree-tos --email $ADMIN_EMAIL
+
+    if [ $? -ne 0 ]; then
+        echo "Certbot no pudo obtener los certificados SSL. Por favor, verifica el dominio y la dirección de correo electrónico."
+        exit 1
+    fi
+
+    echo "Certificados SSL obtenidos exitosamente."
+
+    # --------------------------------------------------
+    # Paso 3: Actualizar Configuración de Nginx para Incluir SSL
+    # --------------------------------------------------
+    echo -e "\n---- Actualizando configuración de Nginx para incluir SSL ----"
+
+    sudo bash -c "cat > /etc/nginx/sites-available/${WEBSITE_NAME}" <<EOF
+# Odoo server - Configuración con SSL
+upstream odoo_${INSTANCE_NAME} {
+    server 127.0.0.1:${OE_PORT};
+}
+upstream odoochat_${INSTANCE_NAME} {
+    server 127.0.0.1:${GEVENT_PORT};
+}
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name ${WEBSITE_NAME};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${WEBSITE_NAME};
+
+    ssl_certificate /etc/letsencrypt/live/${WEBSITE_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${WEBSITE_NAME}/privkey.pem;
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+
+    # HSTS
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+
+    # OCSP Stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
+    error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
+
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
+
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+
+    location / {
+        proxy_pass http://odoo_${INSTANCE_NAME};
+    }
+
+    location /longpolling {
+        proxy_pass http://odoochat_${INSTANCE_NAME};
+    }
+
+    location ~* /web/static/ {
+        proxy_cache_valid 200 90m;
+        proxy_buffering on;
+        expires 864000;
+        proxy_pass http://odoo_${INSTANCE_NAME};
+    }
+}
+EOF
+
+    # Probar la configuración de Nginx
+    sudo nginx -t
+    if [ $? -ne 0 ]; then
+        echo "La prueba de configuración de Nginx con SSL falló. Por favor, verifica la configuración."
+        exit 1
+    fi
+
+    # Reiniciar Nginx para aplicar la configuración actualizada
+    sudo systemctl restart nginx
+
+    echo "Configuración de Nginx para la instancia '$INSTANCE_NAME' con SSL está activa y funcionando."
+
+else
+    echo "Nginx no está configurado para la instancia '$INSTANCE_NAME' debido a la elección del usuario de no habilitar SSL."
+
+    # Configurar Nginx sin SSL
+    echo -e "\n---- Configurando Nginx para la instancia '$INSTANCE_NAME' sin SSL ----"
+
+    NGINX_CONF_FILE="/etc/nginx/sites-available/${INSTANCE_NAME}"
+    # Eliminar configuración de Nginx existente si existe
+    if [ -f "$NGINX_CONF_FILE" ]; then
+        echo "Se encontró una configuración de Nginx existente para '$INSTANCE_NAME'. Eliminándola."
+        sudo rm -f "$NGINX_CONF_FILE"
+        sudo rm -f "/etc/nginx/sites-enabled/${INSTANCE_NAME}" || true
+    fi
+
+    # Crear configuración de Nginx sin SSL
+    sudo bash -c "cat > /etc/nginx/sites-available/${INSTANCE_NAME}" <<EOF
+# Odoo server
+upstream odoo_${INSTANCE_NAME} {
+    server 127.0.0.1:${OE_PORT};
+}
+upstream odoochat_${INSTANCE_NAME} {
+    server 127.0.0.1:${GEVENT_PORT};
+}
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name ${SERVER_IP};
+
+    access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
+    error_log /var/log/nginx/${INSTANCE_NAME}.error.log;
+
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
+
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+
+    location / {
+        proxy_pass http://odoo_${INSTANCE_NAME};
+    }
+
+    location /longpolling {
+        proxy_pass http://odoochat_${INSTANCE_NAME};
+    }
+
+    location ~* /web/static/ {
+        proxy_cache_valid 200 90m;
+        proxy_buffering on;
+        expires 864000;
+        proxy_pass http://odoo_${INSTANCE_NAME};
+    }
+}
+EOF
+
+    # Enlazar la configuración a sites-enabled
+    sudo ln -s "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/${INSTANCE_NAME}
+
+    echo "Configuración de Nginx para la instancia '$INSTANCE_NAME' creada en $NGINX_CONF_FILE"
+
+    # Probar la configuración de Nginx
+    sudo nginx -t
+    if [ $? -ne 0 ]; then
+        echo "La prueba de configuración de Nginx falló. Por favor, verifica la configuración."
+        exit 1
+    fi
+
+    # Reiniciar Nginx para aplicar la nueva configuración
+    sudo systemctl restart nginx
+
+    echo "Configuración de Nginx sin SSL está activa y funcionando para la instancia '$INSTANCE_NAME'."
+fi
 
 echo "-----------------------------------------------------------"
 echo "¡La instancia '$INSTANCE_NAME' se ha agregado exitosamente!"
