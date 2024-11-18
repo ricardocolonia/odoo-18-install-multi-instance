@@ -171,7 +171,7 @@ CONFIG_FILE="/etc/${OE_USER}-${INSTANCE_NAME}.conf"
 sudo bash -c "cat > ${CONFIG_FILE}" <<EOF
 [options]
 admin_passwd = ${SUPERADMIN_PASS}
-db_host = False
+db_host = localhost
 db_port = False
 db_user = ${INSTANCE_NAME}
 db_password = ${DB_PASSWORD}
@@ -179,6 +179,13 @@ addons_path = ${OE_BASE_CODE}/addons,${CUSTOM_ADDONS_DIR}
 http_port = ${ODOO_PORT}
 gevent_port = ${GEVENT_PORT}
 logfile = /var/log/${OE_USER}/${INSTANCE_NAME}.log
+limit_memory_hard = 2677721600
+limit_memory_soft = 1829145600
+limit_request = 8192
+limit_time_cpu = 600
+limit_time_real = 1200
+max_cron_threads = 1
+workers = 2
 EOF
 
 # Si tiene licencia Enterprise, agregar ruta de addons Enterprise
