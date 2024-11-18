@@ -65,8 +65,9 @@ sudo apt-get install -y \
     libx11-6 \
     xfonts-75dpi \
     xfonts-base
-sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.focal_amd64.deb
-sudo dpkg -i wkhtmltox_0.12.5-1.focal_amd64.deb
-sudo apt-get install -f -y
-sudo ln -s /usr/local/bin/wkhtmltopdf /usr/bin
-sudo ln -s /usr/local/bin/wkhtmltoimage /usr/bin
+sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.6/wkhtmltox-0.12.6-1.generic-amd64.tar.xz -O /tmp/wkhtmltox.tar.xz
+sudo tar -xf /tmp/wkhtmltox.tar.xz -C /tmp
+sudo cp /tmp/wkhtmltox/bin/wkhtmltopdf /usr/local/bin/
+sudo cp /tmp/wkhtmltox/bin/wkhtmltoimage /usr/local/bin/
+sudo chmod +x /usr/local/bin/wkhtmltopdf
+sudo chmod +x /usr/local/bin/wkhtmltoimage
