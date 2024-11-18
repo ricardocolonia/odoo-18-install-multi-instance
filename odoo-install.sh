@@ -1,161 +1,60 @@
 #!/bin/bash
-################################################################################
-# Script for installing Odoo on Ubuntu
-# Author: Based on script by Yenthe Van Ginneken, modified to install Odoo without instances
-#-------------------------------------------------------------------------------
-# This script will install Odoo on your Ubuntu server.
-# It will prompt for the Odoo version to install.
-#-------------------------------------------------------------------------------
-# To use this script:
-# 1. Save it as odoo-install.sh
-#    sudo nano odoo-install.sh
-# 2. Make the script executable:
-#    sudo chmod +x odoo-install.sh
-# 3. Run the script:
-#    sudo ./odoo-install.sh
-################################################################################
 
-# Base variables
-INSTALL_WKHTMLTOPDF="True"
-INSTALL_POSTGRESQL_FOURTEEN="True"
+# Script de instalación de Odoo 18 en Ubuntu 24.04 LTS
 
-# Prompt for Odoo version
-read -p "Enter the Odoo version to install (17 or 18): " OE_VERSION_INPUT
-if [ "$OE_VERSION_INPUT" == "17" ]; then
-    OE_VERSION="17.0"
-elif [ "$OE_VERSION_INPUT" == "18" ]; then
-    OE_VERSION="18.0"
-else
-    echo "Invalid Odoo version. Please enter 17 or 18."
-    exit 1
-fi
+# Salir inmediatamente si un comando falla
+set -e
 
-# Set OE_HOME and OE_HOME_EXT based on version
-OE_USER="odoo"
-OE_BASE_DIR="/odoo"
-OE_VERSION_SHORT="$OE_VERSION_INPUT"
-OE_HOME="$OE_BASE_DIR/odoo$OE_VERSION_SHORT"
-OE_HOME_EXT="$OE_HOME/${OE_USER}-server"
+# Solicitar la contraseña para el usuario de PostgreSQL
+read -s -p "Ingresa la contraseña para el usuario de PostgreSQL 'odoo18': " DB_PASSWORD
+echo
 
-#--------------------------------------------------
-# Update Server and Install Dependencies
-#--------------------------------------------------
-echo -e "\n---- Update Server and Install Dependencies ----"
+echo "Actualizando el servidor..."
 sudo apt-get update
 sudo apt-get upgrade -y
 
-# Install build tools and development libraries
-sudo apt-get install build-essential -y
-sudo apt-get install libxml2-dev libxslt1-dev zlib1g-dev -y
-sudo apt-get install libsasl2-dev libldap2-dev libssl-dev -y
-sudo apt-get install libpq-dev -y
+echo "Instalando y configurando medidas de seguridad..."
+sudo apt-get install -y openssh-server fail2ban
+sudo systemctl start fail2ban
+sudo systemctl enable fail2ban
 
-# Install Python 3 and development headers
-sudo apt-get install python3 python3-venv python3-dev -y
+echo "Instalando paquetes y librerías requeridas..."
+sudo apt-get install -y python3-pip python3-dev libxml2-dev libxslt1-dev zlib1g-dev \
+libsasl2-dev libldap2-dev build-essential libssl-dev libffi-dev libjpeg-dev libpq-dev \
+liblcms2-dev libblas-dev libatlas-base-dev npm node-less git python3-venv
 
-# Use the default Python 3 version
-PYTHON_BIN=$(which python3)
+echo "Instalando Node.js y NPM..."
+sudo apt-get install -y nodejs npm
 
-# Verify Python installation
-if [ -z "$PYTHON_BIN" ]; then
-    echo "Python 3 is not installed. Exiting."
-    exit 1
+if [ ! -f /usr/bin/node ]; then
+    echo "Creando enlace simbólico para node..."
+    sudo ln -s /usr/bin/nodejs /usr/bin/node
 fi
 
-echo "Using Python at $PYTHON_BIN"
+echo "Instalando less y less-plugin-clean-css..."
+sudo npm install -g less less-plugin-clean-css
 
-#--------------------------------------------------
-# Install PostgreSQL Server
-#--------------------------------------------------
-echo -e "\n---- Install PostgreSQL Server ----"
-if [ $INSTALL_POSTGRESQL_FOURTEEN = "True" ]; then
-    echo -e "\n---- Installing PostgreSQL V14 ----"
-    sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
-    sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-    sudo apt-get update
-    sudo apt-get install postgresql-14 -y
-else
-    echo -e "\n---- Installing the default PostgreSQL version ----"
-    sudo apt-get install postgresql postgresql-server-dev-all -y
-fi
+echo "Instalando PostgreSQL..."
+sudo apt-get install -y postgresql
 
-#--------------------------------------------------
-# Create ODOO system user
-#--------------------------------------------------
-echo -e "\n---- Creating ODOO system user ----"
-if id "$OE_USER" >/dev/null 2>&1; then
-    echo "User $OE_USER already exists."
-else
-    sudo adduser --system --quiet --shell=/bin/bash --home=$OE_BASE_DIR --gecos 'ODOO' --group $OE_USER
-    # For security reasons, do not add the odoo user to sudo group
-fi
+echo "Creando usuario de PostgreSQL para Odoo..."
+sudo -u postgres psql -c "CREATE USER odoo18 WITH CREATEDB SUPERUSER PASSWORD '$DB_PASSWORD';"
 
-#--------------------------------------------------
-# Install ODOO
-#--------------------------------------------------
-echo -e "\n==== Installing ODOO Server ===="
-sudo mkdir -p $OE_HOME
-sudo chown -R $OE_USER:$OE_USER $OE_HOME
+echo "Creando usuario de sistema para Odoo..."
+sudo adduser --system --home=/odoo --group odoo18
 
-echo -e "\n---- Creating Log directory ----"
-sudo mkdir -p /var/log/$OE_USER
-sudo chown $OE_USER:$OE_USER /var/log/$OE_USER
+echo "Clonando Odoo 18 desde GitHub..."
+sudo -u odoo18 -H git clone --depth 1 --branch master --single-branch https://www.github.com/odoo/odoo /odoo/
 
-echo -e "\n---- Cloning Odoo source code ----"
-echo "OE_HOME_EXT is set to '$OE_HOME_EXT'"
-if [ ! -d "$OE_HOME_EXT" ]; then
-    echo "Directory $OE_HOME_EXT does not exist, proceeding to clone Odoo source code."
-    sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/odoo $OE_HOME_EXT/
-    sudo chown -R $OE_USER:$OE_USER $OE_HOME_EXT/
-else
-    echo "Odoo source code already exists at $OE_HOME_EXT"
-fi
+echo "Creando entorno virtual de Python..."
+sudo -u odoo18 -H python3 -m venv /odoo/venv
 
-echo -e "\n---- Creating custom addons directory ----"
-CUSTOM_ADDONS="$OE_HOME/custom/addons"
-sudo mkdir -p $CUSTOM_ADDONS
-sudo chown -R $OE_USER:$OE_USER $OE_HOME
+echo "Instalando paquetes Python requeridos..."
+sudo -u odoo18 -H /odoo/venv/bin/pip install wheel
+sudo -u odoo18 -H /odoo/venv/bin/pip install -r /odoo/requirements.txt
 
-echo -e "\n---- Creating virtual environment ----"
-if [ ! -d "$OE_HOME/venv" ]; then
-    sudo -u $OE_USER $PYTHON_BIN -m venv $OE_HOME/venv
-    if [ $? -ne 0 ]; then
-        echo "Failed to create virtual environment. Exiting."
-        exit 1
-    fi
-else
-    echo "Virtual environment already exists at $OE_HOME/venv"
-fi
-
-echo -e "\n---- Installing Python requirements ----"
-sudo -u $OE_USER $OE_HOME/venv/bin/pip install --upgrade pip
-sudo -u $OE_USER $OE_HOME/venv/bin/pip install wheel
-
-# Install dependencies that support Python 3.12
-sudo -u $OE_USER $OE_HOME/venv/bin/pip install psycopg2-binary
-sudo -u $OE_USER $OE_HOME/venv/bin/pip install -r $OE_HOME_EXT/requirements.txt
-
-if [ $? -ne 0 ]; then
-    echo "Failed to install Python requirements. Exiting."
-    exit 1
-fi
-
-echo -e "\n---- Installing Node.js NPM and rtlcss for LTR support ----"
-sudo apt-get install nodejs npm -y
-sudo npm install -g rtlcss
-
-#--------------------------------------------------
-# Install Wkhtmltopdf if needed
-#--------------------------------------------------
-if [ $INSTALL_WKHTMLTOPDF = "True" ]; then
-  echo -e "\n---- Installing wkhtmltopdf ----"
-  sudo apt install wkhtmltopdf -y
-else
-  echo "Wkhtmltopdf isn't installed due to the choice of the user!"
-fi
-
-echo "-----------------------------------------------------------"
-echo "Done! Odoo version $OE_VERSION_SHORT is installed."
-echo "Code location: $OE_HOME_EXT"
-echo "Custom addons folder: $CUSTOM_ADDONS"
-echo "-----------------------------------------------------------"
+echo "Instalando wkhtmltopdf..."
+sudo apt-get install -y xfonts-75dpi
+sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.bionic_amd64.deb -O /tmp/wkhtmltox.deb
+sudo dpkg -i /tmp/wkhtmltox.deb || true
+sudo apt-get -f install -y
