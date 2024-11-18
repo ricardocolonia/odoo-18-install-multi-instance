@@ -63,7 +63,8 @@ sudo apt-get install -y \
     libxext6 \
     libfreetype6 \
     libx11-6 \
-    xfonts-75dpi
+    xfonts-75dpi \
+    xfonts-base
 sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.focal_amd64.deb
 sudo dpkg -i wkhtmltox_0.12.5-1.focal_amd64.deb
 sudo apt-get install -f -y
