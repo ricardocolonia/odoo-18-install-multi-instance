@@ -25,7 +25,7 @@ generate_random_password() {
 # Variables base
 OE_USER="odoo18"
 OE_HOME="/odoo"
-OE_BASE_CODE="${OE_HOME}/odoo"  # Directorio donde está el código base de Odoo
+OE_BASE_CODE="${OE_HOME}"  # Directorio donde está el código base de Odoo
 BASE_ODOO_PORT=8069
 BASE_GEVENT_PORT=8072  # Puerto base para gevent (longpolling)
 PYTHON_VERSION="3.11"
@@ -38,6 +38,21 @@ if ! command -v python${PYTHON_VERSION} &> /dev/null; then
     sudo add-apt-repository ppa:deadsnakes/ppa -y
     sudo apt update
     sudo apt install python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev -y
+fi
+
+# Verificar e instalar Certbot y Nginx si no están instalados
+if ! command -v certbot &> /dev/null; then
+    echo "Certbot no está instalado. Instalando Certbot..."
+    sudo apt update
+    sudo apt install certbot python3-certbot-nginx -y
+fi
+
+if ! command -v nginx &> /dev/null; then
+    echo "Nginx no está instalado. Instalando Nginx..."
+    sudo apt update
+    sudo apt install nginx -y
+    sudo systemctl enable nginx
+    sudo systemctl start nginx
 fi
 
 # Obtener la dirección IP del servidor
@@ -133,9 +148,18 @@ VENV_DIR="${INSTANCE_DIR}/venv"
 sudo -u $OE_USER python${PYTHON_VERSION} -m venv "${VENV_DIR}"
 echo "Entorno virtual creado en '${VENV_DIR}'."
 
-# Instalar dependencias en el entorno virtual
+# Actualizar pip en el entorno virtual
+sudo -u $OE_USER "${VENV_DIR}/bin/pip" install --upgrade pip
+
+# Instalar wheel en el entorno virtual
 sudo -u $OE_USER "${VENV_DIR}/bin/pip" install wheel
+
+# Instalar dependencias en el entorno virtual
 sudo -u $OE_USER "${VENV_DIR}/bin/pip" install -r "${OE_BASE_CODE}/requirements.txt"
+
+# Instalar gevent en el entorno virtual
+sudo -u $OE_USER "${VENV_DIR}/bin/pip" install gevent
+
 echo "Dependencias instaladas en el entorno virtual."
 
 # Encontrar puertos disponibles
