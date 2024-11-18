@@ -37,6 +37,7 @@ install_package "lsof"
 install_package "nginx"
 install_package "snapd"
 install_package "openssl"  # Ensure openssl is installed
+install_package "git"      # Ensure git is installed
 
 # Install Certbot if not installed
 if ! command -v certbot &> /dev/null; then
@@ -81,7 +82,8 @@ fi
 OE_BASE_DIR="/odoo"
 OE_HOME="$OE_BASE_DIR/odoo$OE_VERSION_SHORT"
 OE_HOME_EXT="$OE_HOME/${OE_USER}-server"
-ENTERPRISE_ADDONS="${OE_HOME}/enterprise/addons"
+ENTERPRISE_DIR="${OE_HOME}/enterprise"
+ENTERPRISE_ADDONS="${ENTERPRISE_DIR}/addons"
 
 # Gather existing instances
 INSTANCE_CONFIG_FILES=(/etc/${OE_USER}-server-*.conf)
@@ -156,6 +158,7 @@ if [[ "$ENTERPRISE_CHOICE" =~ ^(yes|y)$ ]]; then
 else
     HAS_ENTERPRISE_LICENSE="False"
 fi
+echo "HAS_ENTERPRISE_LICENSE is set to '$HAS_ENTERPRISE_LICENSE'"
 
 # Check if instance already exists
 if [[ " ${EXISTING_INSTANCE_NAMES[@]} " =~ " ${INSTANCE_NAME} " ]]; then
@@ -221,6 +224,24 @@ echo -e "\n==== Configuring ODOO Instance '$INSTANCE_NAME' ===="
 INSTANCE_DIR="${OE_HOME}/${INSTANCE_NAME}"
 sudo mkdir -p "${INSTANCE_DIR}/custom/addons"
 sudo chown -R $OE_USER:$OE_USER "${INSTANCE_DIR}"
+
+# If HAS_ENTERPRISE_LICENSE is True, set up the enterprise addons directory
+if [ "$HAS_ENTERPRISE_LICENSE" = "True" ]; then
+    echo "Setting up Enterprise addons directory..."
+    # Create the enterprise directory if it doesn't exist
+    if [ ! -d "$ENTERPRISE_ADDONS" ]; then
+        sudo mkdir -p "$ENTERPRISE_ADDONS"
+        sudo chown -R $OE_USER:$OE_USER "$ENTERPRISE_DIR"
+        echo "Enterprise addons directory created at $ENTERPRISE_ADDONS"
+    else
+        echo "Enterprise addons directory already exists at $ENTERPRISE_ADDONS"
+    fi
+    # Here you would typically clone the enterprise code using your credentials
+    # For example:
+    # sudo -u $OE_USER git clone --depth 1 --branch $OE_VERSION https://<your_enterprise_credentials>@github.com/odoo/enterprise.git "$ENTERPRISE_ADDONS"
+    # Note: Replace <your_enterprise_credentials> with your actual credentials
+    echo "Please ensure you clone the Enterprise code into $ENTERPRISE_ADDONS"
+fi
 
 # Create a virtual environment for the instance using the appropriate Python version
 INSTANCE_VENV="${INSTANCE_DIR}/venv"
@@ -589,6 +610,9 @@ echo "  Configuration File: /etc/${OE_CONFIG}.conf"
 echo "  Logfile: /var/log/${OE_USER}/${OE_CONFIG}.log"
 echo ""
 echo "Custom Addons Folder: ${INSTANCE_DIR}/custom/addons/"
+if [ "$HAS_ENTERPRISE_LICENSE" = "True" ]; then
+    echo "Enterprise Addons Folder: ${ENTERPRISE_ADDONS}"
+fi
 echo ""
 echo "Database Information:"
 echo "  Database User: $INSTANCE_NAME"
