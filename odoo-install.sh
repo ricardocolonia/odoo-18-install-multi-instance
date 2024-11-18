@@ -54,7 +54,16 @@ sudo -u odoo18 -H /odoo/venv/bin/pip install wheel
 sudo -u odoo18 -H /odoo/venv/bin/pip install -r /odoo/requirements.txt
 
 echo "Instalando wkhtmltopdf..."
-sudo apt-get install -y xfonts-75dpi
+wget http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.0g-2ubuntu4_amd64.deb
+sudo dpkg -i libssl1.1_1.1.0g-2ubuntu4_amd64.deb
+sudo apt-get update
+sudo apt-get install -y \
+    fontconfig \
+    libxrender1 \
+    libxext6 \
+    libfreetype6 \
+    libx11-6 \
+    xfonts-75dpi
 sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.focal_amd64.deb
 sudo dpkg -i wkhtmltox_0.12.5-1.focal_amd64.deb
 sudo apt-get install -f -y
