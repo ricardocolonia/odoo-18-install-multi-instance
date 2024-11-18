@@ -36,6 +36,7 @@ install_package() {
 install_package "lsof"
 install_package "nginx"
 install_package "snapd"
+install_package "openssl"  # Ensure openssl is installed
 
 # Install Certbot if not installed
 if ! command -v certbot &> /dev/null; then
@@ -130,6 +131,11 @@ create_postgres_user() {
     local DB_USER=$1
     local DB_PASSWORD=$2
 
+    # Save the current directory
+    ORIGINAL_DIR=$(pwd)
+    # Change to a directory accessible by postgres user
+    cd /tmp
+
     # Check if PostgreSQL user already exists
     if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
         echo "PostgreSQL user '$DB_USER' already exists. Skipping creation."
@@ -138,6 +144,9 @@ create_postgres_user() {
         sudo -u postgres psql -c "CREATE USER $DB_USER WITH CREATEDB NOSUPERUSER NOCREATEROLE PASSWORD '$DB_PASSWORD';"
         echo "PostgreSQL user '$DB_USER' created successfully."
     fi
+
+    # Return to the original directory
+    cd "$ORIGINAL_DIR"
 }
 
 # Prompt for enterprise license
