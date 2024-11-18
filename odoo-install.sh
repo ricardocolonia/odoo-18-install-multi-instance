@@ -55,8 +55,8 @@ sudo -u odoo18 -H /odoo/venv/bin/pip install -r /odoo/requirements.txt
 
 echo "Instalando wkhtmltopdf..."
 sudo apt-get install -y xfonts-75dpi
-sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.focal_i386.deb
-sudo dpkg -i wkhtmltox_0.12.5-1.focal_i386.deb
+sudo wget https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.focal_amd64.deb
+sudo dpkg -i wkhtmltox_0.12.5-1.focal_amd64.deb
 sudo apt-get install -f -y
 sudo ln -s /usr/local/bin/wkhtmltopdf /usr/bin
 sudo ln -s /usr/local/bin/wkhtmltoimage /usr/bin
