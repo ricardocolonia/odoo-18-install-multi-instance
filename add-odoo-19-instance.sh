@@ -10,8 +10,8 @@ set -e
 
 # ---------------------- Config base ----------------------
 OE_USER="odoo"
-OE_HOME="/odoo"                                # CORE ya instalado aquí
-OE_HOME_EXT="${OE_HOME}/${OE_USER}-server"     # Código community 19.0 (core)
+OE_HOME="/odoo"                                   # CORE instalado aquí
+OE_HOME_EXT="${OE_HOME}/${OE_USER}-server"        # Código community (branch 19.0)
 ENTERPRISE_ADDONS="${OE_HOME}/enterprise/addons"  # Si tienes enterprise clonado
 OE_VERSION="19.0"
 
@@ -43,8 +43,7 @@ find_available_port() {
   done
 }
 
-# ------------------- Prechequeos del host ------------------
-# FIX: aseguro toolchain y headers antes de pip
+# ------------------- Prechequeos del host -------------------
 echo "Verificando dependencias del sistema para compilar wheels..."
 PYV=$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
 sudo apt-get update
@@ -54,7 +53,7 @@ sudo apt-get install -y \
   libpq-dev libldap2-dev libsasl2-dev libssl-dev \
   libxml2-dev libxslt1-dev zlib1g-dev libjpeg-dev
 
-# Certbot (opcional + SSL)
+# Certbot (si luego se elige SSL)
 if ! command -v certbot &>/dev/null; then
   echo "Instalando Certbot..."
   sudo snap install core; sudo snap refresh core
@@ -68,11 +67,11 @@ for cfg in /etc/${OE_USER}-server-*.conf; do
   [ -f "$cfg" ] || continue
   name=$(basename "$cfg" | sed "s/${OE_USER}-server-//; s/\.conf//")
   EXISTING_NAMES+=("$name")
-  EXISTING_OE_PORTS+=("$(grep -E '^(xmlrpc_port|http_port)\b' "$cfg" | awk -F'= *' '{print $2}' | tail -n1)")
+  EXISTING_OE_PORTS+=("$(grep -E '^(http_port|xmlrpc_port)\b' "$cfg" | awk -F'= *' '{print $2}' | tail -n1)")
   EXISTING_GEVENT_PORTS+=("$(grep -E '^gevent_port\b' "$cfg" | awk -F'= *' '{print $2}')")
 done
 
-# ------------------- Pedir datos -------------------
+# ------------------- Inputs -------------------
 read -rp "Nombre para la nueva instancia (p.ej. odoo19a): " INSTANCE_NAME
 [[ "$INSTANCE_NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Nombre inválido."; exit 1; }
 [[ " ${EXISTING_NAMES[@]} " =~ " ${INSTANCE_NAME} " ]] && { echo "La instancia '$INSTANCE_NAME' ya existe."; exit 1; }
@@ -130,54 +129,45 @@ INSTANCE_VENV="${INSTANCE_DIR}/venv"
 sudo mkdir -p "${INSTANCE_DIR}/custom/addons"
 sudo chown -R "$OE_USER:$OE_USER" "${INSTANCE_DIR}"
 
+# ------------------- Venv robusto (evita PermissionError) -------------------
 echo "Creando venv para '${INSTANCE_NAME}'..."
-sudo -u "$OE_USER" python3 -m venv "$INSTANCE_VENV"
-sudo -u "$OE_USER" "$INSTANCE_VENV/bin/python" -m ensurepip --upgrade
-sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install --upgrade pip wheel setuptools
+sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && python3 -m venv venv"
+sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/python -m ensurepip --upgrade"
+sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install --upgrade pip wheel setuptools"
 
 # ------------------- Requirements -------------------
-# Si existe un requirements local en CORE, úsalo; si no, usa el remoto oficial
 REQ_LOCAL="${OE_HOME_EXT}/requirements.txt"
 if [ -f "$REQ_LOCAL" ]; then
   echo "Instalando deps desde $REQ_LOCAL ..."
   set +e
-  sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install -r "$REQ_LOCAL"
+  sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install -r '${REQ_LOCAL}'"
   RET=$?
   set -e
 else
   echo "requirements.txt local no encontrado; usando el remoto de Odoo ${OE_VERSION} ..."
   set +e
-  sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install -r "https://raw.githubusercontent.com/odoo/odoo/${OE_VERSION}/requirements.txt"
+  sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install -r 'https://raw.githubusercontent.com/odoo/odoo/${OE_VERSION}/requirements.txt'"
   RET=$?
   set -e
 fi
 
-# FIX: fallback si fallan psycopg2/python-ldap
+# Fallbacks si fallan wheels de psycopg2 / python-ldap
 if [ $RET -ne 0 ]; then
   echo "Algunas ruedas fallaron al compilar. Aplicando fallbacks puntuales..."
-
-  # psycopg2 desde wheel binaria (solo si el build falló)
-  set +e
-  sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install "psycopg2-binary==2.9.9"
-  set -e
-
-  # Asegurar libs para python-ldap y reintentar
+  # psycopg2 binario
+  sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install 'psycopg2-binary==2.9.9' || true"
+  # Reasegurar libs LDAP y reintentar
   sudo apt-get install -y libldap2-dev libsasl2-dev libssl-dev
-  set +e
-  sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install "python-ldap==3.4.4"
-  set -e
-
-  # Reintento del resto (ignorando lo ya satisfecho)
-  set +e
+  sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install 'python-ldap==3.4.4' || true"
+  # Reintento del resto (sin deps ya satisfechas)
   if [ -f "$REQ_LOCAL" ]; then
-    sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install --no-deps -r "$REQ_LOCAL" || true
+    sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install --no-deps -r '${REQ_LOCAL}' || true"
   else
-    sudo -u "$OE_USER" "$INSTANCE_VENV/bin/pip" install --no-deps -r "https://raw.githubusercontent.com/odoo/odoo/${OE_VERSION}/requirements.txt" || true
+    sudo -u "$OE_USER" -H bash -lc "cd '${INSTANCE_DIR}' && venv/bin/pip install --no-deps -r 'https://raw.githubusercontent.com/odoo/odoo/${OE_VERSION}/requirements.txt' || true"
   fi
-  set -e
 fi
 
-# Addons path (con/ sin enterprise)
+# Addons path (con o sin enterprise)
 if [ "$HAS_ENTERPRISE_LICENSE" = "True" ] && [ -d "$ENTERPRISE_ADDONS" ]; then
   ADDONS_PATH="${OE_HOME_EXT}/addons,${INSTANCE_DIR}/custom/addons,${ENTERPRISE_ADDONS}"
 else
