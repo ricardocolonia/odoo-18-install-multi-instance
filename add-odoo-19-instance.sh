@@ -227,7 +227,7 @@ sudo systemctl start "${SERVICE_FILE}"
 sudo systemctl is-active --quiet "${SERVICE_FILE}" || { echo "El servicio no arrancó. Revisa: journalctl -u ${SERVICE_FILE}"; exit 1; }
 echo "Servicio ${SERVICE_FILE} iniciado."
 
-# ------------------- Nginx + SSL -------------------
+# ------------------- Nginx + SSL (según Odoo 19 docs) -------------------
 setup_nginx_defaults() {
   sudo bash -c "cat > /etc/nginx/conf.d/upstreams.conf" <<'EON'
 map $http_upgrade $connection_upgrade {
@@ -257,6 +257,7 @@ server {
 
   location / {
     proxy_pass http://odoo_${INSTANCE_NAME};
+    proxy_http_version 1.1;
     proxy_set_header X-Forwarded-Host \$http_host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
@@ -264,9 +265,9 @@ server {
     proxy_redirect off;
   }
 
-  # Odoo usa /longpolling para gevent
   location /longpolling {
     proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
     proxy_set_header X-Forwarded-Host \$http_host;
@@ -285,43 +286,78 @@ EOF
   # Certbot
   sudo certbot certonly --nginx $DOMAIN_ARGS --non-interactive --agree-tos --email "$ADMIN_EMAIL" --redirect
 
-  # Paso 2: HTTPS final (+ redirect)
-  sudo bash -c "cat > $NCONF" <<EOF
+  # Paso 2: HTTPS final (+ redirect) - Conforme a documentación oficial Odoo 19
+  sudo bash -c "cat > $NCONF" <<'EOF'
 upstream odoo_${INSTANCE_NAME} { server 127.0.0.1:${OE_PORT}; }
 upstream odoochat_${INSTANCE_NAME} { server 127.0.0.1:${GEVENT_PORT}; }
 
-server { listen 80; server_name ${NGINX_SERVER_NAME}; return 301 https://\$host\$request_uri; }
+server { listen 80; server_name ${NGINX_SERVER_NAME}; return 301 https://$host$request_uri; }
 
 server {
   listen 443 ssl http2;
   server_name ${NGINX_SERVER_NAME};
 
+  client_max_body_size 2G;
+  client_body_timeout 3600s;
+  proxy_read_timeout 720s;
+  proxy_connect_timeout 720s;
+  proxy_send_timeout 720s;
+
   ssl_certificate /etc/letsencrypt/live/${WEBSITE_NAME}/fullchain.pem;
   ssl_certificate_key /etc/letsencrypt/live/${WEBSITE_NAME}/privkey.pem;
+  ssl_session_timeout 30m;
   ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+  ssl_prefer_server_ciphers off;
 
   access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
   error_log  /var/log/nginx/${INSTANCE_NAME}.error.log;
 
+  location /websocket {
+    proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+    proxy_cookie_flags session_id samesite=lax secure;
+  }
+
   location /longpolling {
     proxy_pass http://odoochat_${INSTANCE_NAME};
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection \$connection_upgrade;
-    proxy_set_header X-Forwarded-Host \$http_host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+    proxy_cookie_flags session_id samesite=lax secure;
   }
 
   location / {
     proxy_pass http://odoo_${INSTANCE_NAME};
-    proxy_set_header X-Forwarded-Host \$http_host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_http_version 1.1;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
     proxy_redirect off;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+    proxy_cookie_flags session_id samesite=lax secure;
   }
 
   gzip on;
@@ -341,28 +377,50 @@ upstream odoochat_${INSTANCE_NAME} { server 127.0.0.1:${GEVENT_PORT}; }
 
 server {
   listen 80;
-  server_name $(hostname -I | awk '{print $1}');
+  server_name \$(hostname -I | awk '{print \$1}');
+
+  client_max_body_size 2G;
+  client_body_timeout 3600s;
 
   access_log /var/log/nginx/${INSTANCE_NAME}.access.log;
   error_log  /var/log/nginx/${INSTANCE_NAME}.error.log;
 
-  location / {
-    proxy_pass http://odoo_${INSTANCE_NAME};
-    proxy_set_header X-Forwarded-Host \$http_host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_redirect off;
-  }
-
-  location /longpolling {
+  location /websocket {
     proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
     proxy_set_header X-Forwarded-Host \$http_host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_buffering off;
+    proxy_request_buffering off;
+  }
+
+  location /longpolling {
+    proxy_pass http://odoochat_${INSTANCE_NAME};
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection \$connection_upgrade;
+    proxy_set_header X-Forwarded-Host \$http_host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_buffering off;
+    proxy_request_buffering off;
+  }
+
+  location / {
+    proxy_pass http://odoo_${INSTANCE_NAME};
+    proxy_http_version 1.1;
+    proxy_set_header X-Forwarded-Host \$http_host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_redirect off;
+    proxy_buffering off;
+    proxy_request_buffering off;
   }
 
   gzip on;
